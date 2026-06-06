@@ -48,9 +48,22 @@ to change; duration changes ripple downstream clips automatically.
    available, and reference clips by their `source/...` path in `sequence-clips-add`. If the
    user mentions footage you can't find, run `sources-list` first.
 
-1. **Understand before editing.** When given footage, ALWAYS run `media-info` first. If you
-   have a vision/transcription capability available, use it to learn *what* the footage
-   contains before proposing cuts.
+1. **Understand before editing.** When given footage, ALWAYS run `media-info` first to get
+   technical specs.
+
+   **Know what each clip IS (visual content), not just its filename.** Before selecting or
+   arranging clips for anything beyond a trivial request, build content awareness:
+   - Run `media-frames --source <clip>` to extract 3 representative frames, then **Read those
+     frame images** to see what's actually in the shot (subject, action, framing, location).
+   - Record it with `content-set --source <clip> --description "wide shot of band on stage,
+     warm light" --shot-type wide --subjects "band,stage"`. This caches what the clip is.
+   - Reuse it: run `content-list` to recall clip descriptions instead of re-viewing frames.
+     Check it before picking clips so your choices are grounded in real content.
+   - For many clips, sample the hero candidates rather than every clip; record as you go so
+     you never re-analyze the same clip twice (it's cached in `analysis/content.json`).
+
+   This is what lets you say "I used the close-up of the singer for the hook" instead of
+   blindly placing files by name.
 
 2. **THE GOLDEN RULE — analysis timestamps are NOT cut points.** Semantic analysis ("the
    product appears around 0:12") is approximate (±1–2s). Never paste those numbers straight

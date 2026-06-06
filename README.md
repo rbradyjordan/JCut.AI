@@ -1,7 +1,13 @@
-# JCut.AI
+<p align="center">
+  <img src="docs/logo.png" alt="JCut.AI" width="120" height="120" />
+</p>
 
-An AI video editor that understands your footage and cuts it for you. You talk to it
-in plain language; it plans the edit, places clips on a timeline, and renders the result.
+<h1 align="center">JCut.AI</h1>
+
+<p align="center">An AI video editor that understands your footage and cuts it for you.</p>
+
+You talk to it in plain language; it plans the edit, places clips on a timeline, and
+renders the result.
 
 JCut.AI is modeled on the "agent + tools" architecture: a language model does the
 *reasoning* (what to cut, how to pace it) while a deterministic CLI does the *work*

@@ -64,6 +64,28 @@ MONTAGE-FIRST. The song is the skeleton; the footage hangs off it.
 | mid (verse/build) | every 2–4 beats | rising tempo, J/L cuts, motion matches |
 | high (drop/chorus) | every 1–2 beats | beat-synced hard cuts, speed ramps, best shots |
 
+## Matching SHOT CONTENT to the song (not just pacing)
+
+Pacing is half the job; the other half is choosing *which shot* plays over *which part of
+the music*. Use your clip content awareness (`content-list` / `media-frames`) together with
+the musical map (`analyze-music` → energy `sections`) to place shots by meaning:
+
+- **Low-energy intro / breakdown** → **wide establishing shots, atmosphere, scene-setting.**
+  Show *where we are*. Slow push-ins, landscapes, the crowd before the show. Let it breathe.
+- **Build / verse (rising energy)** → **medium shots, movement, anticipation building.** Shots
+  with motion and direction; tighten as the section climbs. Start introducing your subjects.
+- **Drop / chorus (peak energy)** → **your BEST and most dynamic shots — close-ups, action,
+  payoff moments, faces, impact.** This is where the hero shots and the energy land on the beat.
+- **Lyrics / vocals** → when the track has vocal hits or a lyric moment, land a meaningful shot
+  (a face, the payoff) right on it. Sound-driven shot selection reads as intentional.
+- **The hook (first downbeat)** → your single strongest or most surprising shot. Earn attention.
+- **The resolve (final downbeat)** → a held, conclusive shot (hero, logo, the "after"). End it.
+
+Concretely: get the energy sections, get the clip descriptions, then assign shot *types* to
+section *energies* before placing anything. Don't put a static wide on the drop or waste your
+best close-up in the quiet intro. Shot-to-music fit is what separates a real edit from clips
+on a beat grid.
+
 ## Montage / Sizzle (non-recap)
 
 Same beat-driven approach, but no narrative arc required — prioritize the strongest

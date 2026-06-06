@@ -20,6 +20,7 @@ import { analyzeSequence, buildStyleProfile } from "./analyze.js";
 import { analyzePrproj, importPrprojClips } from "./prproj.js";
 import { exportPremiere } from "./prproj-export.js";
 import { analyzeMusic } from "./beats.js";
+import { extractFrames, saveContent, loadContent, ClipContent } from "./content.js";
 import { BUILTIN_MODES, loadPresets, savePreset, deletePreset, resolveInstructions } from "./presets.js";
 import {
   Sequence, sequenceDuration, Orientation, orientationCanvas, orientationOf,
@@ -314,6 +315,41 @@ async function main() {
             note: "Originals are referenced in place. No video data was duplicated.",
           },
         });
+        break;
+      }
+
+      case "media-frames": {
+        // Extract representative frames from a clip so the agent can SEE what it
+        // is. Returns frame paths to Read. --workspace W --source <path> [--count 3]
+        const ws = a.workspace || fail("--workspace required");
+        const source = a.source || fail("--source required");
+        const { frames, durationSeconds } = await extractFrames(ws, source, Number(a.count) || 3);
+        emit({ ok: true, source, duration_seconds: Number(durationSeconds.toFixed(2)), frames });
+        break;
+      }
+
+      case "content-set": {
+        // The agent records what a clip IS after viewing its frames.
+        // --workspace W --source <path> --description "..." [--shot-type] [--subjects a,b]
+        const ws = a.workspace || fail("--workspace required");
+        await saveContent(ws, {
+          source: a.source || fail("--source required"),
+          description: a.description || fail("--description required"),
+          shot_type: a["shot-type"] || undefined,
+          subjects: a.subjects ? String(a.subjects).split(",").map((s: string) => s.trim()) : undefined,
+          updated: Date.now(),
+        });
+        emit({ ok: true, source: a.source });
+        break;
+      }
+
+      case "content-list": {
+        // Read cached clip descriptions ("what each clip is"). Lean output.
+        const ws = a.workspace || fail("--workspace required");
+        const all = await loadContent(ws);
+        const entries = Object.values(all).map((c: ClipContent) =>
+          `${c.source.split("/").pop()}: ${c.description}${c.shot_type ? ` [${c.shot_type}]` : ""}`);
+        emit({ ok: true, count: entries.length, content: entries });
         break;
       }
 
