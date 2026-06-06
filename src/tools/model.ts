@@ -1,0 +1,162 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// The timeline data model. A Sequence is just JSON on disk (a .wfseq.json file).
+// Clips are REFERENCES to source media (path + trim points), never copies.
+// This mirrors Wideframe's sequence model: tracks V1/V2/A1.., clips with
+// trim/transform, ripple-by-default editing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Vec2 = { x: number; y: number };
+
+export interface Transform {
+  position: Vec2;   // pixel offset of the clip's anchor within the canvas
+  scale: Vec2;      // 1.0 = source pixels map 1:1 to canvas pixels
+  rotation: number; // degrees, clockwise
+}
+
+export interface Fade {
+  fade_in_seconds: number;
+  fade_out_seconds: number;
+}
+
+// A speed ramp: piecewise speed over the clip's own timeline. Each keyframe is
+// (at_seconds within the clip, speed multiplier). Rendered as time-remapping.
+// Example slow-mo→realtime: [{at:0,speed:0.3},{at:1.0,speed:1.0}].
+export interface SpeedKeyframe { at: number; speed: number; }
+
+export interface Clip {
+  id: string;
+  track: string;              // "V1" | "V2" | "A1" ...
+  source_path: string;        // absolute path or path relative to workspace
+  start_time_seconds: number; // position on the timeline
+  trim_start_seconds: number; // in-point within the source
+  trim_end_seconds: number;   // out-point within the source
+  speed: number;              // constant playback rate multiplier (default 1.0)
+  speed_keyframes?: SpeedKeyframe[]; // optional speed ramp; overrides `speed` when present
+  volume_db: number;          // 0 = unchanged; -6 = half; -60 ~ silence
+  transform?: Transform;      // video/image clips only
+  fade?: Fade;
+  link_id?: string | null;    // shared id linking a paired V/A clip
+  // source metadata, probed at add-time:
+  source_width?: number;
+  source_height?: number;
+  source_fps?: number;
+  source_duration?: number;
+  has_audio?: boolean;
+  clip_type: "video" | "image" | "audio";
+}
+
+export interface SequenceSettings {
+  width: number;
+  height: number;
+  framerate: number;
+  sample_rate: number;  // Hz, default 48000
+  color_space: string;  // default "bt709"
+}
+
+export interface Sequence {
+  id: string;
+  name: string;
+  description?: string;
+  settings: SequenceSettings;
+  clips: Clip[];
+  // (captions, transitions, markers would live here too — omitted for MVP)
+}
+
+// Effective on-timeline duration of a clip (trim length scaled by speed).
+export function clipTimelineDuration(c: Clip): number {
+  const raw = c.trim_end_seconds - c.trim_start_seconds;
+  return raw / (c.speed || 1.0);
+}
+
+export function clipTimelineEnd(c: Clip): number {
+  return c.start_time_seconds + clipTimelineDuration(c);
+}
+
+export function sequenceDuration(seq: Sequence): number {
+  return seq.clips.reduce((max, c) => Math.max(max, clipTimelineEnd(c)), 0);
+}
+
+const VIDEO_EXT = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"]);
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"]);
+const AUDIO_EXT = new Set([".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg"]);
+
+export function clipTypeForPath(p: string): "video" | "image" | "audio" {
+  const dot = p.lastIndexOf(".");
+  const ext = dot >= 0 ? p.slice(dot).toLowerCase() : "";
+  if (IMAGE_EXT.has(ext)) return "image";
+  if (AUDIO_EXT.has(ext)) return "audio";
+  if (VIDEO_EXT.has(ext)) return "video";
+  return "video";
+}
+
+export function isVideoTrack(track: string): boolean {
+  return /^V\d+$/.test(track);
+}
+export function isAudioTrack(track: string): boolean {
+  return /^A\d+$/.test(track);
+}
+// V1 -> A1, V2 -> A2 (paired audio track for auto-linking)
+export function pairedAudioTrack(videoTrack: string): string {
+  return "A" + videoTrack.slice(1);
+}
+
+// ── Orientation ──────────────────────────────────────────────────────────────
+// Canvas presets for the three orientations. "both" is not a canvas — it means
+// the caller produces one sequence per concrete orientation (vertical + horizontal).
+export type Orientation = "vertical" | "horizontal" | "square";
+
+export interface CanvasPreset { width: number; height: number; }
+
+export function orientationCanvas(o: Orientation, hd = true): CanvasPreset {
+  switch (o) {
+    case "vertical":   return hd ? { width: 1080, height: 1920 } : { width: 720, height: 1280 };
+    case "square":     return { width: 1080, height: 1080 };
+    case "horizontal":
+    default:           return hd ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
+  }
+}
+
+export function orientationOf(s: SequenceSettings): Orientation {
+  if (s.width === s.height) return "square";
+  return s.width > s.height ? "horizontal" : "vertical";
+}
+
+// Compute the transform that places a source of (sw×sh) into a (cw×ch) canvas in
+// FILL mode (cover the whole canvas, cropping overflow), centered — with an
+// optional subject bias in normalized source coords (0..1) to keep a subject in
+// frame when cropping. Returns scale (uniform) + pixel position offset.
+//
+//   scale     = max(cw/sw, ch/sh)          // cover
+//   position  = center the scaled image, then shift by subject bias
+//
+// position is the top-left offset of the scaled source within the canvas. The
+// renderer's overlay uses these pixel offsets directly.
+export function fillTransform(
+  sw: number, sh: number, cw: number, ch: number,
+  subjectX = 0.5, subjectY = 0.5,
+): { scale: number; position: Vec2 } {
+  if (!sw || !sh) return { scale: 1, position: { x: 0, y: 0 } };
+  const scale = Math.max(cw / sw, ch / sh);
+  const scaledW = sw * scale;
+  const scaledH = sh * scale;
+  // Center, then bias so the subject point maps toward the canvas center.
+  // Default subject 0.5,0.5 => pure centering.
+  const x = (cw / 2) - (subjectX * scaledW);
+  const y = (ch / 2) - (subjectY * scaledH);
+  // Clamp so we never reveal empty canvas (keep the scaled image covering it).
+  const clampedX = Math.min(0, Math.max(cw - scaledW, x));
+  const clampedY = Math.min(0, Math.max(ch - scaledH, y));
+  return { scale, position: { x: Math.round(clampedX), y: Math.round(clampedY) } };
+}
+
+// FIT mode (letterbox/pillarbox): show the whole source, may have bars.
+export function fitTransform(
+  sw: number, sh: number, cw: number, ch: number,
+): { scale: number; position: Vec2 } {
+  if (!sw || !sh) return { scale: 1, position: { x: 0, y: 0 } };
+  const scale = Math.min(cw / sw, ch / sh);
+  return {
+    scale,
+    position: { x: Math.round((cw - sw * scale) / 2), y: Math.round((ch - sh * scale) / 2) },
+  };
+}

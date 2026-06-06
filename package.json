@@ -1,0 +1,26 @@
+{
+  "name": "jcut-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JCut.AI — an AI video editor. Claude Agent SDK + ffmpeg, runs on your Claude Max subscription.",
+  "type": "module",
+  "bin": {
+    "jc": "./dist/tools/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "tools": "tsx src/tools/cli.ts",
+    "agent": "tsx src/agent.ts",
+    "edit": "tsx src/agent.ts",
+    "edit:local": "tsx src/agent-local.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

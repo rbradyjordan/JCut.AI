@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* default = dark; applyTheme() overrides these at runtime */
+  --bg: #0D0D0F;
+  --bg-grad: radial-gradient(120% 80% at 50% 120%, #0c1633 0%, #0D0D0F 55%);
+  --surface: #16171B;
+  --surface-2: #1E2026;
+  --border: rgba(255,255,255,0.08);
+  --text: #F4F5F7;
+  --text-dim: #9BA0AA;
+  --accent: #23C6A2;
+  --accent-blue: #2E6BE6;
+  --shadow: 0 12px 40px rgba(0,0,0,0.55);
+  --glow: 0 0 60px rgba(46,107,230,0.25);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  transition: background 0.5s ease, color 0.4s ease;
+}
+
+/* Subtle film-grain texture overlay (the "texture" the user wants), very low opacity. */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Gemini-style ambient gradient backdrop */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-grad);
+  transition: background 0.5s ease;
+}
+
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Draggable title region for the frameless window */
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
