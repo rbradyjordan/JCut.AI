@@ -30,6 +30,8 @@ Both drive the *same* `jc` tools CLI. Switch between them in Settings.
 - **Cool cuts** — beat-synced cutting, J/L cuts, punch-ins, match cuts, speed-ramp whips.
 - **Music maps** — `analyze-music` extracts BPM, a beat grid, and energy sections so the
   agent can pace edits to the song.
+- **Visual clip analysis** — `analyze-video` extracts shot composition, camera settle time,
+  and motion peaks so the local agent can choose better trims and cut-on-action moments.
 - **Recap videos** — a specialty: music-driven, section-paced montages with a hook,
   escalating energy, speed-ramped highlights, and a resolved ending.
 - **Modes & presets** — built-in modes (Recap, Montage, Talking-Head, Ad, Trailer,
@@ -90,6 +92,7 @@ Workspaces live under `~/Documents/JCutAI/`. Set `JCUT_HOME` to override.
 JCUT_HOME=~/Documents/JCutAI node dist/tools/cli.js sequence-create \
   --workspace demo --name "First Cut" --orientation horizontal --framerate 30
 node dist/tools/cli.js analyze-music --file song.wav
+node dist/tools/cli.js analyze-video --workspace "couples shoot" --file source/video/clip.mp4
 node dist/tools/cli.js sequence-import-prproj --workspace demo --file project.prproj
 ```
 
@@ -108,6 +111,22 @@ npm run dist               # builds JCut.AI.app + a DMG into app/release/
 - ffmpeg / ffprobe on PATH (`brew install ffmpeg`)
 - For Claude: the `claude` CLI logged into your Max plan
 - For Local: LM Studio with a tool-calling model and the server running
+
+## Legal and acknowledgements
+
+JCut.AI includes third-party open-source components. The current acknowledgement
+index lives in [THIRD_PARTY_NOTICES.md](/Users/bradyjordan/Documents/JcutAI-app/THIRD_PARTY_NOTICES.md).
+
+Current bundled visual-analysis acknowledgements include:
+
+- `sssabet/Shot_Type_Classification` — MIT license, with the bundled license kept at
+  [third_party/Shot_Type_Classification/LICENSE](/Users/bradyjordan/Documents/JcutAI-app/third_party/Shot_Type_Classification/LICENSE)
+- A local packaging notice for that model at
+  [third_party/Shot_Type_Classification/NOTICE.md](/Users/bradyjordan/Documents/JcutAI-app/third_party/Shot_Type_Classification/NOTICE.md)
+
+Important: the upstream `Shot_Type_Classification` project is MIT-licensed, but
+its README also states that the underlying dataset terms may restrict commercial
+use. Treat that model as review-required before shipping a commercial build.
 
 ---
 

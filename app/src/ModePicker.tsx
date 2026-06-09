@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { spring, TEAL_GRADIENT } from "./theme";
+import { ChevronDown, Plus } from "./Icons";
 
 interface ModeItem { id: string; name: string; description: string; }
 
@@ -36,11 +37,11 @@ export default function ModePicker({
       <motion.button
         whileTap={{ scale: 0.96 }}
         onClick={() => { setOpen((o) => !o); refresh(); }}
-        className="flex items-center gap-1.5 rounded-pill bg-surface2 px-3 py-1 text-[12px] text-ink ring-1 ring-line"
+        className="flex items-center gap-1.5 rounded-pill bg-surface2 px-3 py-1 text-[12px] text-ink shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]"
       >
         <span className="text-dim">Mode:</span>
         <span className="font-medium">{label}</span>
-        <span className="text-dim">▾</span>
+        <ChevronDown className="h-3 w-3 text-dim" />
       </motion.button>
 
       <AnimatePresence>
@@ -48,7 +49,7 @@ export default function ModePicker({
           <motion.div
             initial={{ opacity: 0, y: -6, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.97 }} transition={spring.snappy}
-            className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl2 bg-surface p-1.5 shadow-card ring-1 ring-line"
+            className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl2 depth-card p-1.5 shadow-card shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]"
           >
             <Item label="Freeform" desc="No mode — edit as asked" active={!value} onClick={() => pick(null)} />
             <div className="my-1 px-2 text-[10px] font-semibold uppercase tracking-wide text-dim">Modes</div>
@@ -66,7 +67,7 @@ export default function ModePicker({
             <button
               onClick={() => { setOpen(false); onManagePresets(); }}
               className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-[12px] text-accent hover:bg-surface2"
-            >＋ Create / manage presets…</button>
+            ><Plus size={14} stroke={1.5} className="inline mr-1" />Create / manage presets…</button>
           </motion.div>
         )}
       </AnimatePresence>

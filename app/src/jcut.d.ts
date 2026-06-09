@@ -5,17 +5,31 @@ export type Backend = "claude" | "local";
 export interface AppSettings {
   onboarded: boolean;
   backend: Backend;
-  theme: "dark" | "light" | "system";
+  localMode: "single" | "dual";
+  theme: "dark" | "light" | "midnight" | "forest" | "warm" | "slate" | "system";
+  accent: "teal" | "ocean" | "indigo" | "violet" | "magenta" | "rose" | "amber" | "emerald" | "lime" | "crimson" | "cyan" | "slate";
   workspace: string;
   claudeConnected: boolean;
   claudeAccount: string | null;
   lmStudioUrl: string;
-  lmStudioModel: string | null;
+  lmStudioCoderModel: string | null;
+  lmStudioVisionModel: string | null;
+  hybridMode: boolean;
   mode: string | null;
+  claudeModel: "opus" | "sonnet";
+  skillStyleName: string;
+  skillImportName: string;
+  skillAnalysisName: string;
   sidebarWidth: number;
   panelWidth: number;
   panelCollapsed: boolean;
   showReasoning: boolean;
+  density: "compact" | "comfortable" | "spacious";
+  fontScale: "small" | "default" | "large";
+  radius: "sharp" | "default" | "round";
+  uiFont: "system" | "inter" | "rounded" | "mono";
+  reduceMotion: boolean;
+  grain: boolean;
 }
 
 declare global {
@@ -26,13 +40,15 @@ declare global {
     claudeStatus(): Promise<{ ok: boolean; available: boolean; version?: string; bin?: string; note: string }>;
     claudeLoginHelp(): Promise<{ ok: boolean }>;
     lmStudioTest(url: string): Promise<{ ok: boolean; models?: string[]; error?: string; normalizedUrl?: string }>;
-    runAgent(prompt: string): Promise<{ ok: boolean }>;
+    runAgent(prompt: string, chatId?: string): Promise<{ ok: boolean }>;
     stopAgent(): Promise<{ ok: boolean; stopped: boolean }>;
     onAgentChunk(cb: (chunk: string) => void): () => void;
+    onUsageUpdate(cb: (info: any) => void): () => void;
     onAgentDone(cb: (code: string) => void): () => void;
     pickMedia(): Promise<{ ok: boolean; paths?: string[] }>;
     pickFolder(): Promise<{ ok: boolean; path?: string }>;
     pickPrproj(): Promise<{ ok: boolean; path?: string }>;
+    pickSavePrproj(defaultName?: string): Promise<{ ok: boolean; path?: string }>;
     readImage(filePath: string): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
     listWorkspaces(): Promise<{ ok: boolean; workspaces: string[]; home?: string; error?: string }>;
     reveal(p: string): Promise<{ ok: boolean }>;
@@ -48,6 +64,9 @@ declare global {
     projectStats(ws: string): Promise<{ ok: boolean; sequences: number; chats: number }>;
     setProjectThumbnail(ws: string): Promise<{ ok: boolean; dataUrl?: string | null; isManual?: boolean; canceled?: boolean; error?: string }>;
     resetProjectThumbnail(ws: string): Promise<{ ok: boolean; dataUrl?: string | null; isManual?: boolean; error?: string }>;
+    projectDelete(ws: string): Promise<{ ok: boolean; error?: string }>;
+    projectRename(ws: string, name: string): Promise<{ ok: boolean; name?: string; error?: string }>;
+    projectDuplicate(ws: string): Promise<{ ok: boolean; name?: string; error?: string }>;
   }
   interface Window { jcut: JcutBridge; }
 }

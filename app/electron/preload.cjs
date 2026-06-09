@@ -17,12 +17,17 @@ contextBridge.exposeInMainWorld("jcut", {
   lmStudioTest: (url) => ipcRenderer.invoke("lmstudio-test", url),
 
   // agent run + steer/interrupt
-  runAgent: (prompt) => ipcRenderer.invoke("agent-run", prompt),
+  runAgent: (prompt, chatId) => ipcRenderer.invoke("agent-run", prompt, chatId),
   stopAgent: () => ipcRenderer.invoke("agent-stop"),
   onAgentChunk: (cb) => {
     const h = (_e, chunk) => cb(chunk);
     ipcRenderer.on("agent-chunk", h);
     return () => ipcRenderer.removeListener("agent-chunk", h);
+  },
+  onUsageUpdate: (cb) => {
+    const h = (_e, info) => cb(JSON.parse(info));
+    ipcRenderer.on("usage-update", h);
+    return () => ipcRenderer.removeListener("usage-update", h);
   },
   onAgentDone: (cb) => {
     const h = (_e, code) => cb(code);
@@ -33,6 +38,7 @@ contextBridge.exposeInMainWorld("jcut", {
   pickMedia: () => ipcRenderer.invoke("pick-media"),
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
   pickPrproj: () => ipcRenderer.invoke("pick-prproj"),
+  pickSavePrproj: (defaultName) => ipcRenderer.invoke("pick-save-prproj", defaultName),
   readImage: (filePath) => ipcRenderer.invoke("read-image", filePath),
   listWorkspaces: () => ipcRenderer.invoke("list-workspaces"),
   reveal: (p) => ipcRenderer.invoke("reveal", p),
@@ -72,4 +78,7 @@ contextBridge.exposeInMainWorld("jcut", {
   projectStats: (ws) => ipcRenderer.invoke("project-stats", ws),
   setProjectThumbnail: (ws) => ipcRenderer.invoke("set-project-thumbnail", ws),
   resetProjectThumbnail: (ws) => ipcRenderer.invoke("reset-project-thumbnail", ws),
+  projectDelete: (ws) => ipcRenderer.invoke("project-delete", ws),
+  projectRename: (ws, name) => ipcRenderer.invoke("project-rename", ws, name),
+  projectDuplicate: (ws) => ipcRenderer.invoke("project-duplicate", ws),
 });

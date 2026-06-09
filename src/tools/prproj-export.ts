@@ -13,7 +13,7 @@
 // is not installed.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { promises as fs } from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
 import { Sequence, isVideoTrack, clipTimelineDuration } from "./model.js";
 import { workspaceDir } from "./store.js";
@@ -36,12 +36,42 @@ export async function findCaltools(): Promise<string | null> {
 }
 
 function abs(workspace: string, src: string): string {
-  return path.isAbsolute(src) ? src : path.join(workspaceDir(workspace), src);
+  if (path.isAbsolute(src)) return src;
+  const ws = workspaceDir(workspace);
+  // Match addClips' source resolution: a clip may be stored as a bare filename
+  // (what sources-list reports), "video/clip.mp4", or "source/video/clip.mp4".
+  // Search the source dirs so the export resolves the same paths clip-add accepted.
+  const direct = path.join(ws, src);
+  if (existsSync(direct)) return direct;
+  const base = path.basename(src);
+  for (const sub of ["video", "audio", "images"]) {
+    const cand = path.join(ws, "source", sub, base);
+    if (existsSync(cand)) return cand;
+  }
+  const underSource = path.join(ws, "source", src);
+  if (existsSync(underSource)) return underSource;
+  return direct; // fall back so the error names a real path
+}
+
+// Resolve a (possibly symlinked) source to its REAL path. caltools imports media
+// then looks it up by path internally — if we hand it the workspace symlink, that
+// lookup returns None and EVERY clip-add fails (empty Premiere timeline). Passing
+// the real target path fixes the export.
+// If realpath fails (broken symlink, unmounted drive) we throw rather than falling
+// back to the symlink path — handing caltools an unresolvable path would silently
+// drop the clip into clipErrors anyway, and throwing surfaces the failure loudly.
+async function realSource(workspace: string, src: string): Promise<string> {
+  const p = abs(workspace, src);
+  return await fs.realpath(p);
 }
 
 // Run a caltools subcommand, returning parsed JSON (or throwing with stderr).
+// Hard timeout so a wedged caltools process can never hang the export forever.
 async function ct(bin: string, args: string[]): Promise<any> {
-  const { stdout } = await pexecFile(bin, args, { maxBuffer: 1 << 26, env: process.env });
+  const { stdout } = await pexecFile(bin, args, {
+    maxBuffer: 1 << 26, env: process.env,
+    timeout: 120000, killSignal: "SIGKILL",
+  });
   try { return JSON.parse(stdout); } catch { return { raw: stdout }; }
 }
 
@@ -52,16 +82,30 @@ export interface ExportResult {
   warnings?: string[];
   sequences: number;
   clips: number;
+  captions_in_timeline?: number;
+  transitions_in_timeline?: number;
 }
 
 export async function exportPremiere(
   workspace: string,
   seq: Sequence,
   outputPath: string,
+  allowBuiltin = false,
 ): Promise<ExportResult> {
   const bin = await findCaltools();
   if (!bin) {
-    // No Wideframe → use the built-in clean writer (absolute paths).
+    // No Wideframe/caltools. The built-in from-scratch writer emits a minimal
+    // object graph that is NOT validated against real Premiere — it can open as
+    // an empty/corrupt timeline, silently losing the user's edit. So we refuse
+    // by default and require an explicit opt-in (--allow-unverified).
+    if (!allowBuiltin) {
+      throw new Error(
+        "Premiere export requires the validated engine (Wideframe/caltools), which was not found. " +
+        "The built-in writer is unverified and may produce an empty timeline. " +
+        "Install Wideframe for a guaranteed export, or re-run with --allow-unverified to use the " +
+        "built-in writer at your own risk (verify the project opens correctly in Premiere).",
+      );
+    }
     const r = await exportFromScratch(seq, outputPath);
     return { output: r.output, engine: "builtin", sequences: 1, clips: r.clips };
   }
@@ -102,20 +146,30 @@ export async function exportPremiere(
   for (const t of inspected.audio_tracks || []) trackUid[t.name] = t.track_uid;
   const sequenceUid: string = inspected.sequence_uid;
 
-  // 4. Add each JCut clip via add_clip_with_media (caltools imports the media,
-  //    builds the full object graph, and links cross-refs). Map our fields:
-  //    start/end = timeline; in/out = source trim; motion/volume/speed optional.
+  // 4. Build ALL clip ops first, then add them in ONE batched call.
+  //    Previously this looped one `prproj edit` per clip — and each edit re-reads
+  //    and re-writes the entire .prproj, making export O(n²) on file size. A
+  //    367-clip export took minutes and could time out mid-way. caltools accepts
+  //    an array of operations, so we send them all at once: one parse, one write.
   let clipCount = 0;
+  const clipErrors: string[] = [];
+  const ops: any[] = [];
   for (const c of seq.clips) {
-    // Audio clips auto-paired in JCut are added on their own A track here.
     const tUid = trackUid[c.track];
     if (!tUid) continue; // track not present (shouldn't happen)
     const dur = clipTimelineDuration(c);
+    let resolvedSource: string;
+    try {
+      resolvedSource = await realSource(workspace, c.source_path);
+    } catch (e) {
+      clipErrors.push(`${path.basename(c.source_path)}: cannot resolve path — ${(e as Error).message.slice(0, 100)}`);
+      continue;
+    }
     const op: any = {
       op: "add_clip_with_media",
       sequence_uid: sequenceUid,
       track_uid: tUid,
-      source: abs(workspace, c.source_path),
+      source: resolvedSource,
       start_seconds: round(c.start_time_seconds),
       end_seconds: round(c.start_time_seconds + dur),
       in_point_seconds: round(c.trim_start_seconds),
@@ -124,16 +178,31 @@ export async function exportPremiere(
     if (c.speed && c.speed !== 1) op.speed = c.speed;
     if (typeof c.volume_db === "number" && c.volume_db !== 0) op.volume_db = c.volume_db;
     if (c.transform) {
-      // caltools motion: position normalized 0..1 (center 0.5,0.5), scale percent.
       op.scale = Math.round((c.transform.scale.x || 1) * 100);
       if (c.transform.rotation) op.rotation = c.transform.rotation;
     }
+    ops.push(op);
+  }
+
+  if (ops.length > 0) {
     try {
+      // One batched edit — fast even for hundreds of clips.
       await ct(bin, ["prproj", "edit", "--file", outputPath, "--output", outputPath,
-        "--operations", JSON.stringify([op])]);
-      clipCount++;
-    } catch (e) {
-      // Keep going; report at the end. One bad clip shouldn't abort the export.
+        "--operations", JSON.stringify(ops)]);
+      clipCount = ops.length;
+    } catch (batchErr) {
+      // Batch failed (one bad clip can reject the whole array). Fall back to
+      // per-clip adds so good clips still land and we learn exactly which failed.
+      for (const op of ops) {
+        try {
+          await ct(bin, ["prproj", "edit", "--file", outputPath, "--output", outputPath,
+            "--operations", JSON.stringify([op])]);
+          clipCount++;
+        } catch (e) {
+          const name = path.basename(String(op.source));
+          clipErrors.push(`${name}: ${(e as Error).message.slice(0, 120)}`);
+        }
+      }
     }
   }
 
@@ -148,7 +217,51 @@ export async function exportPremiere(
   // Clean up the temp spec.
   try { await fs.rm(specPath, { force: true }); } catch { /* ok */ }
 
-  return { output: outputPath, engine: "caltools", valid, warnings, sequences: 1, clips: clipCount };
+  // Hard fail on zero clips (empty timeline is never a success).
+  // Also hard fail when more than half the clips were dropped — a majority-empty
+  // timeline returned as "success" is just as misleading as a fully empty one.
+  if (seq.clips.length > 0 && clipCount === 0) {
+    throw new Error(
+      `Premiere export produced an EMPTY timeline — all ${seq.clips.length} clips failed to add. ` +
+      `First errors: ${clipErrors.slice(0, 3).join(" | ")}`,
+    );
+  }
+  // Throw if more than half the clips failed — use total clip count as the
+  // denominator so a 5-fail/5-succeed (50/50) case correctly fails.
+  if (clipErrors.length > 0 && clipErrors.length >= seq.clips.length / 2) {
+    throw new Error(
+      `Premiere export dropped ${clipErrors.length} of ${seq.clips.length} clips (≥50% failed). ` +
+      `First errors: ${clipErrors.slice(0, 3).join(" | ")}`,
+    );
+  }
+
+  const mergedWarnings = [...(warnings || []), ...clipErrors];
+
+  // Captions and transitions live in the JCut timeline. caltools' edit API has no
+  // add_caption/add_transition op, so we don't silently claim they exported — we
+  // surface them so the user knows to verify/finish them in Premiere rather than
+  // assuming they made it into the .prproj.
+  const capCount = seq.captions?.length || 0;
+  const trCount = seq.transitions?.length || 0;
+  if (capCount > 0) {
+    mergedWarnings.push(
+      `${capCount} caption(s) are in the JCut timeline but were NOT written into the .prproj ` +
+      `(the export engine has no caption-injection op). Add them in Premiere, or keep editing ` +
+      `text in JCut.`,
+    );
+  }
+  if (trCount > 0) {
+    mergedWarnings.push(
+      `${trCount} transition(s) are in the JCut timeline but were NOT written into the .prproj ` +
+      `(the export engine has no transition op). Re-apply them in Premiere.`,
+    );
+  }
+
+  return {
+    output: outputPath, engine: "caltools", valid, warnings: mergedWarnings,
+    sequences: 1, clips: clipCount,
+    captions_in_timeline: capCount, transitions_in_timeline: trCount,
+  };
 }
 
 function fpsToRational(fps: number): { num: number; den: number } {

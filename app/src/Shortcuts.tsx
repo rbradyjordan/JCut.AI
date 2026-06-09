@@ -2,6 +2,7 @@
 // A springy pop-up modal matching the app's design language.
 import { motion } from "framer-motion";
 import { spring } from "./theme";
+import { Close } from "./Icons";
 
 const GROUPS: { title: string; items: [string, string][] }[] = [
   {
@@ -46,7 +47,7 @@ export default function Shortcuts({ onClose }: { onClose: () => void }) {
       >
         <div className="mb-4 flex items-center">
           <h2 className="text-lg font-semibold">Keyboard Shortcuts</h2>
-          <button onClick={onClose} className="ml-auto text-dim hover:text-ink">✕</button>
+          <button onClick={onClose} className="ml-auto text-dim hover:text-ink"><Close size={14} stroke={1.5} /></button>
         </div>
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
           {GROUPS.map((g) => (

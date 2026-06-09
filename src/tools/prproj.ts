@@ -311,11 +311,16 @@ export function buildPrprojXml(
     );
   });
 
-  // Group clips by track.
+  // Group clips by track, build linked-item ID map for V/A pairs.
   const trackNames = [...new Set(seq.clips.map((c) => c.track))]
     .sort((x, y) => (x[0] === y[0] ? Number(x.slice(1)) - Number(y.slice(1)) : x[0] === "V" ? -1 : 1));
 
-  const trackXml: string[] = [];
+  // Pre-assign a stable item ObjectID per clip so V/A pairs can cross-reference.
+  const itemIds = new Map<string, number>();
+  for (const c of seq.clips) itemIds.set(c.id, next());
+
+  const videoTrackXml: string[] = [];
+  const audioTrackXml: string[] = [];
   let clipCount = 0;
   for (const tname of trackNames) {
     const isV = isVideoTrack(tname);
@@ -327,13 +332,31 @@ export function buildPrprojXml(
       const endT = secToTicks(c.start_time_seconds + clipTimelineDuration(c));
       const inT = secToTicks(c.trim_start_seconds);
       const outT = secToTicks(c.trim_end_seconds);
-      const itemId = next();
+      const itemId = itemIds.get(c.id)!;
       const tag = isV ? "VideoClipTrackItem" : "AudioClipTrackItem";
       const cls = isV ? "368b0406-29e3-4923-9fcd-094fbf9a1089" : "064ec682-9ba6-11d5-af2d-9ca32c7d6164";
-      // PlaybackSpeed folds in constant speed (and ramps fall back to their average).
+      // PlaybackSpeed: use average of keyframes (ramp) or constant speed.
       const speed = c.speed_keyframes?.length
         ? c.speed_keyframes.reduce((a, k) => a + k.speed, 0) / c.speed_keyframes.length
         : (c.speed || 1);
+
+      // Build linked-clip references: find the paired clip sharing the same
+      // link_id on the opposite track type. Premiere uses <Links> so that
+      // trimming/moving one track item keeps the other in sync.
+      let linksXml = "";
+      if (c.link_id) {
+        const partner = seq.clips.find(
+          (o) => o.link_id === c.link_id && o.id !== c.id,
+        );
+        if (partner) {
+          const partnerId = itemIds.get(partner.id)!;
+          linksXml =
+            `\t\t\t\t<Links>\n` +
+            `\t\t\t\t\t<LinkedClipItem ObjectRef="${partnerId}"/>\n` +
+            `\t\t\t\t</Links>\n`;
+        }
+      }
+
       items.push(
         `\t\t\t<${tag} ObjectID="${itemId}" ClassID="${cls}" Version="6">\n` +
         `\t\t\t\t<Start>${startT}</Start>\n` +
@@ -342,16 +365,18 @@ export function buildPrprojXml(
         `\t\t\t\t<OutPoint>${outT}</OutPoint>\n` +
         `\t\t\t\t<PlaybackSpeed>${speed}</PlaybackSpeed>\n` +
         `\t\t\t\t<SubClip ObjectRef="${m.clip}"/>\n` +
+        linksXml +
         `\t\t\t</${tag}>\n`,
       );
       clipCount++;
     }
-    trackXml.push(
+    const trackBlock =
       `\t\t<Track ObjectID="${trackId}" Version="3">\n` +
       `\t\t\t<Name>${tname}</Name>\n` +
       `\t\t\t<TrackItems>\n${items.join("")}\t\t\t</TrackItems>\n` +
-      `\t\t</Track>\n`,
-    );
+      `\t\t</Track>\n`;
+    if (isV) videoTrackXml.push(trackBlock);
+    else audioTrackXml.push(trackBlock);
   }
 
   const seqObj = next();
@@ -361,7 +386,10 @@ export function buildPrprojXml(
     `\t\t<FrameRate>${Math.round(tickRate / fps)}</FrameRate>\n` +
     `\t\t<VideoFrameWidth>${seq.settings.width}</VideoFrameWidth>\n` +
     `\t\t<VideoFrameHeight>${seq.settings.height}</VideoFrameHeight>\n` +
-    `\t\t<Tracks>\n${trackXml.join("")}\t\t</Tracks>\n` +
+    // Premiere requires separate <VideoTracks> and <AudioTracks> containers.
+    // A single generic <Tracks> block causes Premiere to silently drop all tracks.
+    `\t\t<VideoTracks>\n${videoTrackXml.join("")}\t\t</VideoTracks>\n` +
+    `\t\t<AudioTracks>\n${audioTrackXml.join("")}\t\t</AudioTracks>\n` +
     `\t</Sequence>\n`;
 
   const projId = next();

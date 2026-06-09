@@ -9,6 +9,16 @@ import { loadSettings, saveSettings, AppSettings } from "./settings.cjs";
 
 const pexecFile = promisify(execFile);
 
+// Safety net: a stray error in a background callback (e.g. a child-process event
+// firing after its window closed) must NEVER crash the whole app to a blank
+// window. Log and keep running instead of dying with a red Electron dialog.
+process.on("uncaughtException", (err) => {
+  console.error("[main] uncaughtException (kept alive):", err?.message || err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandledRejection (kept alive):", reason);
+});
+
 const isDev = !app.isPackaged;
 
 // Backend root differs between dev and a packaged app:
@@ -41,15 +51,25 @@ const EXTRA_PATH = [
   path.join(app.getPath("home"), ".nvm", "current", "bin"),
 ].join(":");
 
+// Bundled, native arm64 ffmpeg/ffprobe shipped in backend/bin (portable — works
+// on any Mac with no Rosetta, no install). The backend's bin.ts honors these.
+const FFMPEG_BIN = path.join(BACKEND_ROOT, "bin", "ffmpeg");
+const FFPROBE_BIN = path.join(BACKEND_ROOT, "bin", "ffprobe");
+
 // Env for running our bundled Node CLIs via the Electron binary.
 function nodeEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return {
+  const fsSync = require("node:fs");
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: "1",
     PATH: `${EXTRA_PATH}:${process.env.PATH || ""}`,
     JCUT_HOME,
     ...extra,
   };
+  // Point the backend at the bundled binaries when present.
+  if (fsSync.existsSync(FFMPEG_BIN)) env.JCUT_FFMPEG = FFMPEG_BIN;
+  if (fsSync.existsSync(FFPROBE_BIN)) env.JCUT_FFPROBE = FFPROBE_BIN;
+  return env;
 }
 
 // Env for ffmpeg/ffprobe/claude lookups (richer PATH, but NOT node mode).
@@ -61,6 +81,9 @@ function toolEnv(): NodeJS.ProcessEnv {
 // launch PATH (double-clicked app) still finds it.
 function resolveBin(name: string): string {
   const fsSync = require("node:fs");
+  // Prefer the bundled binary (portable), then common dirs, then PATH.
+  const bundled = path.join(BACKEND_ROOT, "bin", name);
+  try { if (fsSync.existsSync(bundled)) return bundled; } catch { /* skip */ }
   for (const dir of EXTRA_PATH.split(":")) {
     const p = path.join(dir, name);
     try { if (fsSync.existsSync(p)) return p; } catch { /* skip */ }
@@ -98,7 +121,10 @@ function createWindow(): BrowserWindow {
 
 // Send an action to the focused window's renderer (UI handles it).
 function sendToFocused(channel: string) {
-  BrowserWindow.getFocusedWindow()?.webContents.send(channel);
+  try {
+    const wc = BrowserWindow.getFocusedWindow()?.webContents;
+    if (wc && !wc.isDestroyed()) wc.send(channel);
+  } catch { /* window gone — ignore */ }
 }
 
 // Full native menu bar. App / File / Edit / View / Window / Help — every item wired.
@@ -216,13 +242,32 @@ ipcMain.handle("settings-get", () => loadSettings());
 ipcMain.handle("settings-set", (_e, patch: Partial<AppSettings>) => saveSettings(patch));
 
 // ── jc tools (for the live timeline) ─────────────────────────────────────────
+// Per-command timeouts: long ops (render, import, probe-heavy) get a generous
+// cap; everything else fails fast. A wedged tool call must NEVER hang the UI.
+const JC_TIMEOUTS: Record<string, number> = {
+  "sequence-render-final": 900000, // 15 min — long timelines
+  "sequence-import-prproj": 600000, // 10 min — probes many sources
+  "prproj-analyze": 300000,         // 5 min — large Premiere projects
+  "media-info": 300000,            // 5 min — serial probes
+  "source-add": 300000,
+  "analyze-music": 120000,
+  "analyze-video": 120000,
+  "sequence-render-frame": 90000,
+};
 ipcMain.handle("jc", async (_e, command: string, args: string[]) => {
   try {
     const { stdout } = await pexecFile(NODE_BIN, [TOOLS_CLI, command, ...args], {
       maxBuffer: 1 << 26, env: nodeEnv(),
+      timeout: JC_TIMEOUTS[command] ?? 60000, // default 60s — fail fast
+      killSignal: "SIGKILL",
     });
     return { ok: true, stdout };
   } catch (e: any) {
+    // ETIMEDOUT → a clear, actionable message instead of a silent hang.
+    if (e.killed || e.signal === "SIGKILL" || /timed? ?out/i.test(e.message || "")) {
+      return { ok: false, stdout: e.stdout || "",
+        error: `"${command}" took too long and was stopped — the media may be on a slow or disconnected drive (SD card / external). Copy footage to your internal drive for reliable speed.` };
+    }
     // The CLI prints {ok:false,error} JSON to stdout then exits 1. Prefer that
     // clean message over the raw "Command failed: node …" shell error.
     let friendly = e.message;
@@ -302,7 +347,7 @@ ipcMain.handle("lmstudio-test", async (_e, url: string) => {
 });
 
 // ── Agent run (backend-aware) with streaming + interrupt ─────────────────────
-ipcMain.handle("agent-run", async (e, prompt: string) => {
+ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string) => {
   const s = loadSettings();
   const useLocal = s.backend === "local";
   // If an editing mode/preset is active, fetch its instructions and prepend them
@@ -320,29 +365,63 @@ ipcMain.handle("agent-run", async (e, prompt: string) => {
   const fullPrompt = modePrefix + prompt;
   const entry = useLocal ? AGENT_LOCAL : AGENT;
   const extraEnv: Record<string, string> = { FORCE_COLOR: "0" };
-  if (useLocal) {
+  if (useLocal || s.hybridMode) {
     extraEnv.LMSTUDIO_URL = s.lmStudioUrl;
-    if (s.lmStudioModel) extraEnv.LMSTUDIO_MODEL = s.lmStudioModel;
+    if (s.lmStudioCoderModel) extraEnv.LMSTUDIO_CODER_MODEL = s.lmStudioCoderModel;
+    const visionModel =
+      s.localMode === "single"
+        ? (s.lmStudioCoderModel || s.lmStudioVisionModel || "")
+        : (s.lmStudioVisionModel || s.lmStudioCoderModel || "");
+    if (visionModel) extraEnv.LMSTUDIO_VISION_MODEL = visionModel;
   }
+  if (s.hybridMode && !useLocal) {
+    extraEnv.HYBRID_MODE = "true";
+  }
+  // Claude model selection (Opus/Sonnet) — only meaningful for the Claude backend.
+  const agentArgs = [entry, fullPrompt, "--workspace", s.workspace];
+  if (!useLocal && s.claudeModel) agentArgs.push("--model", s.claudeModel);
+  if (chatId) agentArgs.push("--chat-id", chatId);
   return new Promise((resolve) => {
     const winId = BrowserWindow.fromWebContents(e.sender)?.id ?? -1;
+    // STEERING: if a run is already in flight for this window, kill it before
+    // starting the new one (the renderer also stops it, but be defensive).
+    const existing = agentProcs.get(winId);
+    if (existing) { killTree(existing); agentProcs.delete(winId); }
+
     // detached: own process group, so stop can kill the whole tree (incl. ffmpeg
     // grandchildren) — otherwise a render keeps running after the agent is stopped.
-    const child = spawn(NODE_BIN, [entry, fullPrompt, "--workspace", s.workspace], {
+    const child = spawn(NODE_BIN, agentArgs, {
       env: nodeEnv(extraEnv), cwd: PROJECT_ROOT, detached: true,
     });
     agentProcs.set(winId, child);
-    const send = (chan: string, data: string) => e.sender.send(chan, data);
+    // Guard every send: if the window/webContents was destroyed (closed, crashed,
+    // navigated), e.sender.send throws "Object has been destroyed" and takes down
+    // the whole main process. Check first and swallow any residual error.
+    const send = (chan: string, data: string) => {
+      try {
+        if (e.sender && !e.sender.isDestroyed()) e.sender.send(chan, data);
+      } catch { /* renderer gone — ignore */ }
+    };
     let settled = false;
     const finish = (code: number | null, errMsg?: string) => {
       if (settled) return;
       settled = true;
-      agentProcs.delete(winId);
+      // Only clear the map slot if it's STILL this child — a newer (steering) run
+      // may have already replaced it; don't delete the new run's entry.
+      if (agentProcs.get(winId) === child) agentProcs.delete(winId);
       if (errMsg) send("agent-chunk", `\n⚠️ ${errMsg}\n`);
       send("agent-done", String(code ?? 0)); // ALWAYS fire so the UI clears "busy"
       resolve({ ok: code === 0 });
     };
-    child.stdout?.on("data", (d) => send("agent-chunk", d.toString()));
+    child.stdout?.on("data", (d) => {
+      let out = d.toString();
+      const usageMatch = out.match(/__CLAUDE_USAGE_INFO__:({.*})/);
+      if (usageMatch) {
+        send("usage-update", usageMatch[1]);
+        out = out.replace(usageMatch[0], "");
+      }
+      if (out) send("agent-chunk", out);
+    });
     child.stderr?.on("data", (d) => send("agent-chunk", d.toString()));
     child.on("close", (code) => finish(code));
     // If spawn itself fails (bad node path, etc.), still clear busy in the UI.
@@ -350,13 +429,32 @@ ipcMain.handle("agent-run", async (e, prompt: string) => {
   });
 });
 
-// Kill the whole process group of a detached child (agent + ffmpeg grandchildren).
+// Kill a detached child AND its entire descendant tree. Process-group kill alone
+// is not enough: the Agent SDK spawns grandchildren (the `claude` inference
+// process, Bash tool calls, ffmpeg) that can land in different process groups and
+// survive — leaving a zombie that holds the "thinking…" state forever. We walk the
+// descendant tree with `pgrep -P` and SIGKILL each, then the group, then the proc.
 function killTree(proc: ChildProcess) {
+  const pid = proc.pid;
+  if (!pid) return;
   try {
-    if (proc.pid) process.kill(-proc.pid, "SIGKILL"); // negative pid = process group
-  } catch {
-    try { proc.kill("SIGKILL"); } catch { /* already gone */ }
-  }
+    // Recursively collect descendants via pgrep, then kill leaves-first.
+    const { execSync } = require("node:child_process");
+    const collect = (root: number, acc: number[]) => {
+      let kids: number[] = [];
+      try {
+        kids = execSync(`pgrep -P ${root}`, { encoding: "utf8" })
+          .split("\n").map((s: string) => parseInt(s.trim(), 10)).filter(Boolean);
+      } catch { /* no children */ }
+      for (const k of kids) { collect(k, acc); acc.push(k); }
+    };
+    const tree: number[] = [];
+    collect(pid, tree);
+    for (const p of tree) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+  } catch { /* pgrep unavailable — fall through */ }
+  // Process group, then the process itself.
+  try { process.kill(-pid, "SIGKILL"); } catch { /* */ }
+  try { proc.kill("SIGKILL"); } catch { /* already gone */ }
 }
 
 // Interrupt this window's running agent (the "stop" button — steer/interrupt).
@@ -366,6 +464,9 @@ ipcMain.handle("agent-stop", (e) => {
   if (proc) {
     killTree(proc);
     agentProcs.delete(winId);
+    try {
+      if (e.sender && !e.sender.isDestroyed()) e.sender.send("agent-done", "-1");
+    } catch { /* renderer gone — ignore */ }
     return { ok: true, stopped: true };
   }
   return { ok: true, stopped: false };
@@ -479,6 +580,20 @@ ipcMain.handle("pick-prproj", async (e) => {
   });
   if (res.canceled || !res.filePaths.length) return { ok: false };
   return { ok: true, path: res.filePaths[0] };
+});
+
+// Save-location picker for exporting a Premiere .prproj. Returns the chosen
+// absolute path (with a .prproj extension enforced) or { ok:false } if cancelled.
+ipcMain.handle("pick-save-prproj", async (e, defaultName?: string) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  const res = await dialog.showSaveDialog(w!, {
+    title: "Save Premiere Pro project",
+    defaultPath: (defaultName || "Sequence").replace(/[^\w.-]/g, "_") + ".prproj",
+    filters: [{ name: "Premiere Pro Project", extensions: ["prproj"] }],
+  });
+  if (res.canceled || !res.filePath) return { ok: false };
+  const p = res.filePath.endsWith(".prproj") ? res.filePath : res.filePath + ".prproj";
+  return { ok: true, path: p };
 });
 
 ipcMain.handle("get-system-theme", () => (nativeTheme.shouldUseDarkColors ? "dark" : "light"));
@@ -605,4 +720,46 @@ ipcMain.handle("project-stats", async (_e, workspace: string) => {
   const sequences = await count(path.join(JCUT_HOME, workspace, "sequences"), ".jcseq.json");
   const chats = await count(chatsDir(workspace), ".json");
   return { ok: true, sequences, chats };
+});
+
+ipcMain.handle("project-delete", async (_e, workspace: string) => {
+  try {
+    const fs = await import("node:fs/promises");
+    const dir = path.join(JCUT_HOME, workspace);
+    await fs.rm(dir, { recursive: true, force: true });
+    return { ok: true };
+  } catch (e: any) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle("project-rename", async (_e, workspace: string, newName: string) => {
+  try {
+    const fs = await import("node:fs/promises");
+    const safe = newName.trim().replace(/[^\w\s\-]/g, "").replace(/\s+/g, " ").trim();
+    if (!safe) return { ok: false, error: "Invalid name" };
+    const src = path.join(JCUT_HOME, workspace);
+    const dst = path.join(JCUT_HOME, safe);
+    await fs.rename(src, dst);
+    return { ok: true, name: safe };
+  } catch (e: any) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle("project-duplicate", async (_e, workspace: string) => {
+  try {
+    const fs = await import("node:fs/promises");
+    const src = path.join(JCUT_HOME, workspace);
+    // Find a non-colliding name: "Name copy", "Name copy 2", etc.
+    let candidate = `${workspace} copy`;
+    let n = 2;
+    while (true) {
+      try { await fs.access(path.join(JCUT_HOME, candidate)); candidate = `${workspace} copy ${n++}`; }
+      catch { break; }
+    }
+    const dst = path.join(JCUT_HOME, candidate);
+    // Recursive copy via shell cp -a (preserves symlinks, which source/ uses).
+    await new Promise<void>((resolve, reject) => {
+      const cp = spawn("cp", ["-a", src, dst]);
+      cp.on("close", (code) => code === 0 ? resolve() : reject(new Error(`cp failed: ${code}`)));
+    });
+    return { ok: true, name: candidate };
+  } catch (e: any) { return { ok: false, error: e.message }; }
 });

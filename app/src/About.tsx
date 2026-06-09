@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { spring, TEAL_GRADIENT, BLUE_GRADIENT, BRAND } from "./theme";
 import iconUrl from "./assets/icon.png";
+import { Close } from "./Icons";
 
 const VERSION = "0.1.0";
 
@@ -48,7 +49,7 @@ export default function About({ onClose }: { onClose: () => void }) {
           onClick={onClose}
           className="absolute right-5 top-5 z-10 grid h-8 w-8 place-items-center rounded-full bg-white/8 text-white/50 hover:bg-white/15 hover:text-white transition"
           aria-label="Close"
-        >✕</button>
+        ><Close size={14} stroke={1.5} /></button>
 
         {/* ── Content ────────────────────────────────────────────────── */}
         <div className="relative z-10 flex flex-col items-center px-10 pb-10 pt-12 text-center">
@@ -153,6 +154,26 @@ export default function About({ onClose }: { onClose: () => void }) {
             transition={{ ...spring.soft, delay: 0.45 }}
             className="my-7 h-px w-full origin-right bg-white/8"
           />
+
+          <motion.div
+            initial={{ y: 6, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+            transition={{ ...spring.soft, delay: 0.46 }}
+            className="w-full rounded-2xl bg-white/[0.04] px-4 py-3 text-left ring-1 ring-white/8"
+          >
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-white/35">
+              Open-source acknowledgements
+            </p>
+            <p className="mt-2 text-[12px] leading-relaxed text-white/55">
+              JCut.AI includes third-party open-source components, including the
+              MIT-licensed Shot Type Classification model used for visual shot
+              composition analysis. Repository notices and bundled license files
+              should travel with distributions.
+            </p>
+            <p className="mt-2 text-[11px] leading-relaxed text-white/40">
+              Important: that upstream model is MIT-licensed, but its README also
+              flags possible dataset-related commercial-use restrictions.
+            </p>
+          </motion.div>
 
           {/* Links */}
           <motion.div
