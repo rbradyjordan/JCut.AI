@@ -4,6 +4,7 @@ export {};
 export type Backend = "claude" | "local";
 export interface AppSettings {
   onboarded: boolean;
+  termsAccepted: boolean;
   backend: Backend;
   localMode: "single" | "dual";
   theme: "dark" | "light" | "midnight" | "forest" | "warm" | "slate" | "system";

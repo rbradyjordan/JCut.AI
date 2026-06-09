@@ -6,6 +6,7 @@ import Settings from "./Settings";
 import Shortcuts from "./Shortcuts";
 import About from "./About";
 import Onboarding from "./Onboarding";
+import TermsGate from "./TermsGate";
 import Tools from "./Tools";
 import ChatMessage from "./ChatMessage";
 import Sidebar, { ChatMeta } from "./Sidebar";
@@ -78,7 +79,7 @@ const SUGGESTIONS = [
   "Build a rough cut from my footage",
   "Add B-roll over the second answer",
   "Learn my editing style",
-  "Render a verification frame",
+  "Export my sequence to Premiere",
 ];
 
 export default function App() {
@@ -122,6 +123,21 @@ export default function App() {
     });
   }, []);
   useEffect(() => { applyTheme(mode, accent); }, [mode, accent]);
+  // Keep the resolved mode/accent in sync with settings, so changes made anywhere
+  // (onboarding, Settings) apply the theme live — not just via setMode/setAccent.
+  useEffect(() => {
+    if (!settings) return;
+    let cancelled = false;
+    (async () => {
+      const resolved: Mode = settings.theme === "system"
+        ? await window.jcut.getSystemTheme()
+        : (settings.theme as Mode);
+      if (cancelled) return;
+      setModeState(resolved);
+      if (isAccent(settings.accent)) setAccentState(settings.accent);
+    })();
+    return () => { cancelled = true; };
+  }, [settings?.theme, settings?.accent]);
   // Display & feel — re-apply whenever any of the six controls change so the UI
   // updates live. Reads straight from settings (single source of truth).
   useEffect(() => {
@@ -390,6 +406,11 @@ export default function App() {
     return <Onboarding settings={settings} onChange={patch} onDone={(backend: Backend, hybridMode: boolean, localMode: "single" | "dual") => patch({ backend, hybridMode, localMode, onboarded: true })} />;
   }
 
+  // Binding terms gate — must be accepted before reaching the app.
+  if (!settings.termsAccepted) {
+    return <TermsGate onAccept={() => patch({ termsAccepted: true })} />;
+  }
+
   const reduceMotion = !!settings.reduceMotion;
 
   if (view === "grid") {
@@ -415,8 +436,10 @@ export default function App() {
     <div className="grain relative flex h-full flex-col">
       <div className="backdrop" />
 
-      {/* Traffic-light strip */}
-      <div className="drag relative z-30 h-9 shrink-0" />
+      {/* Traffic-light strip — gets a subtle accent gradient bar across the top
+          so the titlebar reads as designed (especially in fullscreen, where the
+          macOS traffic lights hide and the bar can span the full width). */}
+      <div className="titlebar-grad drag relative z-30 h-9 shrink-0" />
 
       <div ref={bodyRef} className="relative flex min-h-0 flex-1 overflow-hidden">
 
@@ -492,7 +515,7 @@ export default function App() {
                           >
                             <span className="flex items-center gap-1.5">
                               <span className="h-1.5 w-1.5 rounded-full" style={{ background: b === "claude" ? "#D97757" : "var(--accent-blue)" }} />
-                              {b === "claude" ? "Claude" : "Local (LM Studio)"}
+                              {b === "claude" ? "Claude" : "Local"}
                             </span>
                             {settings.backend === b && <span className="text-accent">✓</span>}
                           </button>
@@ -503,7 +526,15 @@ export default function App() {
                 </AnimatePresence>
               </div>
 
-              {settings.backend === "local" && weakModel(settings.lmStudioModel) && (
+              {/* Beta badge — JCut.AI is pre-release software. */}
+              <span
+                className="rounded-pill bg-accent/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-accent ring-1 ring-accent/25"
+                title="JCut.AI is beta software — expect rough edges and keep backups of your footage."
+              >
+                Beta
+              </span>
+
+              {settings.backend === "local" && weakModel(settings.lmStudioCoderModel) && (
                 <button onClick={() => setShowSettings(true)}
                   className="flex items-center gap-1 rounded-lg bg-amber-500/10 px-2 py-1 text-[11px] text-amber-400  hover:bg-amber-500/20 transition-colors"
                 >
@@ -731,135 +762,120 @@ function Welcome({ onPick, workspace }: { onPick: (s: string) => void; workspace
   }, []);
 
   return (
-    <div className="relative flex h-full justify-center overflow-auto px-6 py-8">
+    <div className="relative flex h-full justify-center overflow-auto px-4 py-5">
       <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none">
         <motion.div
-          animate={{
-            scale: [1, 1.12, 1],
-            opacity: [0.28, 0.42, 0.28],
-          }}
-          transition={{
-            duration: 10,
-            repeat: Infinity,
-            ease: "easeInOut",
-          }}
-          className="absolute left-[42%] top-[10%] h-[34rem] w-[34rem] -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(var(--accent-glow-rgb),0.18)_0%,transparent_72%)] blur-3xl"
+          animate={{ scale: [1, 1.12, 1], opacity: [0.28, 0.42, 0.28] }}
+          transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          className="absolute left-[42%] top-[10%] h-64 w-64 -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(var(--accent-glow-rgb),0.18)_0%,transparent_72%)] blur-3xl"
         />
-        <div className="absolute right-[12%] top-[18%] h-64 w-64 rounded-full bg-[radial-gradient(circle,rgba(46,107,230,0.12)_0%,transparent_72%)] blur-3xl" />
-        <div className="absolute inset-x-0 bottom-[-12rem] h-[24rem] bg-[radial-gradient(circle_at_center,rgba(var(--accent-glow-rgb),0.16)_0%,transparent_68%)] blur-3xl" />
+        <div className="absolute right-[12%] top-[18%] h-40 w-40 rounded-full bg-[radial-gradient(circle,rgba(46,107,230,0.12)_0%,transparent_72%)] blur-3xl" />
+        <div className="absolute inset-x-0 bottom-[-6rem] h-48 bg-[radial-gradient(circle_at_center,rgba(var(--accent-glow-rgb),0.16)_0%,transparent_68%)] blur-3xl" />
       </div>
 
       <motion.section
         ref={shellRef}
-        initial={{ opacity: 0, y: 15 }}
+        initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={spring.soft}
-        className="relative z-10 my-auto w-full max-w-6xl self-start no-drag"
+        className="relative z-10 my-auto w-full max-w-3xl self-start no-drag"
       >
-        <div className={`grid items-stretch gap-6 ${compactLayout ? `mx-auto grid-cols-1 ${tightLayout ? "max-w-[42rem]" : "max-w-[48rem]"}` : "lg:grid-cols-[1.18fr_0.82fr]"}`}>
-          <div className={`relative overflow-hidden rounded-[2.2rem] border border-white/[0.05] bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.012))] shadow-[0_30px_90px_rgba(0,0,0,0.38)] backdrop-blur-2xl ${compactLayout ? (tightLayout ? "px-6 py-6" : "px-7 py-7") : "px-8 py-8 lg:px-10 lg:py-10"}`}>
+        <div className={`grid items-stretch gap-3 ${compactLayout ? "mx-auto grid-cols-1" : "lg:grid-cols-[1.18fr_0.82fr]"}`}>
+          <div className={`relative overflow-hidden rounded-[1.4rem] border border-white/[0.05] bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.012))] shadow-[0_16px_48px_rgba(0,0,0,0.38)] backdrop-blur-2xl ${compactLayout ? "px-4 py-4" : "px-5 py-5"}`}>
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.045),transparent_34%)]" />
-            <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.8),rgba(46,107,230,0.35),transparent_88%)]" />
+            <div className="absolute left-0 top-0 h-full w-1 bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.8),rgba(46,107,230,0.35),transparent_88%)]" />
             <div className="relative flex h-full flex-col justify-between">
             <div>
               <motion.div
-                initial={{ y: 8, opacity: 0 }}
+                initial={{ y: 5, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ ...spring.soft, delay: 0.04 }}
-                className={`mb-6 inline-flex rounded-2xl depth-chip ${tightLayout ? "flex-col items-start gap-2 px-3 py-3" : "items-center gap-3 px-3 py-2"} ${compactLayout ? "max-w-full" : ""}`}
+                className="mb-3 inline-flex items-center gap-2 rounded-xl depth-chip px-2.5 py-1.5"
               >
-                <div className={`grid place-items-center rounded-2xl bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] shadow-[0_10px_30px_rgba(var(--accent-glow-rgb),0.22)] ${tightLayout ? "h-10 w-10" : "h-11 w-11"}`}>
-                  <img src={iconUrl} alt="JCut.AI" className="h-7 w-7" />
+                <div className="grid h-6 w-6 place-items-center rounded-lg bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] shadow-[0_6px_16px_rgba(var(--accent-glow-rgb),0.22)]">
+                  <img src={iconUrl} alt="JCut.AI" className="h-4 w-4" />
                 </div>
-                <div className={`text-left ${tightLayout ? "w-full" : ""}`}>
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-dim">Editing Desk</div>
-                  <div className={`${tightLayout ? "mt-1 text-[1.15rem]" : "text-sm"} font-semibold text-ink`}>{workspace}</div>
+                <div className="text-left">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.22em] text-dim">Editing Desk</div>
+                  <div className="text-[11px] font-semibold text-ink leading-tight">{workspace}</div>
                 </div>
-                <div className={`${tightLayout ? "hidden" : "ml-2 hidden h-8 w-px bg-white/6 sm:block"}`} />
-                <div className={`${tightLayout ? "text-left" : "hidden text-left sm:block"}`}>
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-dim">Status</div>
-                  <div className={`${tightLayout ? "mt-1 text-[1.05rem]" : "text-sm"} text-ink`}>Ready for a new cut</div>
+                <div className="ml-1 h-5 w-px bg-white/6" />
+                <div className="text-left">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.22em] text-dim">Status</div>
+                  <div className="text-[11px] text-ink leading-tight">Ready for a new cut</div>
                 </div>
               </motion.div>
 
               <motion.h1
-                initial={{ y: 8, opacity: 0 }}
+                initial={{ y: 5, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ ...spring.soft, delay: 0.08 }}
-                className={`max-w-2xl font-semibold tracking-[-0.055em] text-ink ${tightLayout ? "text-[2.7rem] leading-[0.96]" : compactLayout ? "text-[3.1rem] leading-[0.96] sm:text-[3.5rem]" : "text-5xl sm:text-6xl"}`}
+                className="max-w-2xl font-semibold tracking-[-0.055em] text-ink text-[1.8rem] leading-[1.0]"
               >
                 {greeting}, Brady.
               </motion.h1>
 
               <motion.p
-                initial={{ y: 8, opacity: 0 }}
+                initial={{ y: 5, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ ...spring.soft, delay: 0.12 }}
-                className={`mt-4 max-w-2xl text-dim ${tightLayout ? "text-[14px] leading-6" : compactLayout ? "text-[14px] leading-6" : "text-[15px] leading-7"}`}
+                className="mt-2 max-w-2xl text-dim text-[12px] leading-5"
               >
                 The timeline is open, your sources are loaded, and the editor is standing by.
                 Start with a concrete goal and let JCut build momentum from there.
               </motion.p>
 
               <motion.div
-                initial={{ y: 10, opacity: 0 }}
+                initial={{ y: 5, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ ...spring.soft, delay: 0.15 }}
-                className={`mt-7 flex flex-wrap gap-2.5 ${compactLayout ? "max-w-xl" : ""}`}
+                className="mt-3 flex flex-wrap gap-1.5"
               >
-                <span className={`rounded-pill bg-white/5 font-semibold uppercase text-dim ${tightLayout ? "px-2.5 py-1 text-[10px] tracking-[0.16em]" : "px-3 py-1.5 text-[11px] tracking-[0.18em]"}`}>Footage loaded</span>
-                <span className={`rounded-pill bg-accent/12 font-semibold uppercase text-accent ${tightLayout ? "px-2.5 py-1 text-[10px] tracking-[0.16em]" : "px-3 py-1.5 text-[11px] tracking-[0.18em]"}`}>Editor ready</span>
-                <span className={`rounded-pill bg-white/5 font-semibold uppercase text-dim ${tightLayout ? "px-2.5 py-1 text-[10px] tracking-[0.16em]" : "px-3 py-1.5 text-[11px] tracking-[0.18em]"}`}>Premiere export workflow</span>
+                <span className="rounded-pill bg-white/5 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-dim">Footage loaded</span>
+                <span className="rounded-pill bg-accent/12 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-accent">Editor ready</span>
+                <span className="rounded-pill bg-white/5 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-dim">Premiere export workflow</span>
               </motion.div>
 
               {compactLayout && (
                 <motion.div
-                  initial={{ y: 10, opacity: 0 }}
+                  initial={{ y: 6, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
                   transition={{ ...spring.soft, delay: 0.17 }}
-                  className={`mt-6 rounded-[1.45rem] depth-chip ${tightLayout ? "p-4" : "p-4"}`}
+                  className="mt-3 rounded-xl depth-chip p-3"
                 >
-                  <div className="mb-3 flex items-start justify-between gap-4">
+                  <div className="mb-2 flex items-start justify-between gap-3">
                     <div>
-                      <div className="inline-flex items-center gap-2 rounded-pill bg-accent/12 px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-accent">
-                        <Sparkle size={10} stroke={2.2} />
+                      <div className="inline-flex items-center gap-1.5 rounded-pill bg-accent/12 px-2 py-0.5 text-[8px] font-semibold uppercase tracking-[0.18em] text-accent">
+                        <Sparkle size={8} stroke={2.2} />
                         Editorial Note
                       </div>
-                      <div className="mt-3 text-[11px] font-semibold uppercase tracking-[0.22em] text-dim">
+                      <div className="mt-1.5 text-[9px] font-semibold uppercase tracking-[0.22em] text-dim">
                         {activeTip.category}
                       </div>
                     </div>
-                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.24),rgba(255,255,255,0.05))] text-accent shadow-[0_12px_32px_rgba(var(--accent-glow-rgb),0.18)]">
-                      <TipIcon size={18} stroke={1.7} />
+                    <div className="grid h-7 w-7 shrink-0 place-items-center rounded-xl bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.24),rgba(255,255,255,0.05))] text-accent shadow-[0_6px_16px_rgba(var(--accent-glow-rgb),0.18)]">
+                      <TipIcon size={13} stroke={1.7} />
                     </div>
                   </div>
-                  <h3 className={`${tightLayout ? "text-[1.32rem]" : "text-xl"} font-semibold tracking-[-0.03em] text-ink`}>{activeTip.title}</h3>
-                  <p className={`mt-2 text-dim ${tightLayout ? "text-[14px] leading-6" : "text-[14px] leading-6"}`}>{activeTip.desc}</p>
-                  <div className="mt-4 flex items-center justify-between">
-                    <div className="flex gap-1.5">
+                  <h3 className="text-[13px] font-semibold tracking-[-0.03em] text-ink">{activeTip.title}</h3>
+                  <p className="mt-1 text-[11px] leading-[1.5] text-dim">{activeTip.desc}</p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="flex gap-1">
                       {WELCOME_TIPS.map((_, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => setTipIndex(idx)}
-                          className={`rounded-full transition-all duration-300 ${
-                            idx === tipIndex ? "h-1.5 w-7 bg-accent" : "h-1.5 w-1.5 bg-white/10 hover:bg-white/25"
-                          }`}
+                        <button key={idx} onClick={() => setTipIndex(idx)}
+                          className={`rounded-full transition-all duration-300 ${idx === tipIndex ? "h-1 w-5 bg-accent" : "h-1 w-1 bg-white/10 hover:bg-white/25"}`}
                         />
                       ))}
                     </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setTipIndex((prev) => (prev - 1 + WELCOME_TIPS.length) % WELCOME_TIPS.length)}
-                        className="grid h-9 w-9 place-items-center rounded-2xl depth-chip text-dim transition-colors hover:text-ink"
-                      >
-                        <ChevronRight size={13} stroke={1.7} className="rotate-180" />
+                    <div className="flex gap-1.5">
+                      <button onClick={() => setTipIndex((prev) => (prev - 1 + WELCOME_TIPS.length) % WELCOME_TIPS.length)}
+                        className="grid h-6 w-6 place-items-center rounded-lg depth-chip text-dim transition-colors hover:text-ink">
+                        <ChevronRight size={10} stroke={1.7} className="rotate-180" />
                       </button>
-                      <button
-                        onClick={() => setTipIndex((prev) => (prev + 1) % WELCOME_TIPS.length)}
-                        className="grid h-9 w-9 place-items-center rounded-2xl text-white shadow-[0_14px_36px_rgba(var(--accent-glow-rgb),0.22)]"
-                        style={{ background: TEAL_GRADIENT }}
-                      >
-                        <ChevronRight size={13} stroke={1.9} />
+                      <button onClick={() => setTipIndex((prev) => (prev + 1) % WELCOME_TIPS.length)}
+                        className="grid h-6 w-6 place-items-center rounded-lg text-white"
+                        style={{ background: TEAL_GRADIENT }}>
+                        <ChevronRight size={10} stroke={1.9} />
                       </button>
                     </div>
                   </div>
@@ -868,29 +884,29 @@ function Welcome({ onPick, workspace }: { onPick: (s: string) => void; workspace
             </div>
 
             <motion.div
-              initial={{ y: 10, opacity: 0 }}
+              initial={{ y: 6, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               transition={{ ...spring.soft, delay: 0.18 }}
-              className={`grid gap-3 ${compactLayout ? "mt-6 sm:grid-cols-1" : "mt-10 sm:grid-cols-2"}`}
+              className="mt-3 grid gap-2 sm:grid-cols-2"
             >
-              {(tightLayout ? SUGGESTIONS.slice(0, 3) : SUGGESTIONS).map((s, idx) => (
+              {SUGGESTIONS.map((s, idx) => (
                 <motion.button
-                  whileHover={{ scale: 1.015, y: -2 }}
+                  whileHover={{ scale: 1.015, y: -1 }}
                   whileTap={{ scale: 0.985 }}
                   key={s}
                   onClick={() => onPick(s)}
-                  className={`group relative overflow-hidden rounded-[1.45rem] depth-card text-left transition-colors ${tightLayout ? "px-4 py-4" : "px-4 py-4"}`}
+                  className="group relative overflow-hidden rounded-xl depth-card px-3 py-3 text-left transition-colors"
                 >
                   <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(var(--accent-glow-rgb),0.08),transparent_45%)] opacity-0 transition-opacity group-hover:opacity-100" />
-                  <div className={`${tightLayout ? "mb-2.5" : "mb-3"} flex items-center justify-between`}>
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-dim">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-[8px] font-semibold uppercase tracking-[0.22em] text-dim">
                       {idx < 2 ? "Launch Prompt" : "Quick Move"}
                     </span>
-                    <span className="grid h-8 w-8 place-items-center rounded-xl bg-white/5 text-dim transition-colors group-hover:bg-accent/15 group-hover:text-accent">
-                      <ChevronRight size={14} stroke={1.7} />
+                    <span className="grid h-5 w-5 place-items-center rounded-lg bg-white/5 text-dim transition-colors group-hover:bg-accent/15 group-hover:text-accent">
+                      <ChevronRight size={10} stroke={1.7} />
                     </span>
                   </div>
-                  <div className={`relative font-medium text-ink ${tightLayout ? "text-[15px] leading-6" : "text-[15px] leading-6"}`}>{s}</div>
+                  <div className="relative text-[12px] font-medium leading-5 text-ink">{s}</div>
                 </motion.button>
               ))}
             </motion.div>
@@ -898,97 +914,80 @@ function Welcome({ onPick, workspace }: { onPick: (s: string) => void; workspace
           </div>
 
           {!compactLayout && <motion.div
-            initial={{ x: 10, opacity: 0 }}
+            initial={{ x: 8, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             transition={{ ...spring.soft, delay: 0.16 }}
             className="flex"
           >
-            <div className="relative flex w-full flex-col overflow-hidden rounded-[2rem] border border-white/[0.05] bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.012))] p-5 shadow-[0_26px_80px_rgba(0,0,0,0.36)] backdrop-blur-2xl">
+            <div className="relative flex w-full flex-col overflow-hidden rounded-[1.4rem] border border-white/[0.05] bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.012))] p-4 shadow-[0_16px_48px_rgba(0,0,0,0.36)] backdrop-blur-2xl">
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(var(--accent-glow-rgb),0.15),transparent_34%)]" />
-              <div className="relative flex items-start justify-between gap-4">
+              <div className="relative flex items-start justify-between gap-3">
                 <div>
-                  <div className="inline-flex items-center gap-2 rounded-pill bg-accent/12 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-accent">
-                    <Sparkle size={11} stroke={2.4} />
+                  <div className="inline-flex items-center gap-1.5 rounded-pill bg-accent/12 px-2 py-0.5 text-[8px] font-semibold uppercase tracking-[0.24em] text-accent">
+                    <Sparkle size={9} stroke={2.4} />
                     Editorial Note
                   </div>
-                  <div className="mt-4 text-[11px] font-semibold uppercase tracking-[0.24em] text-dim">
+                  <div className="mt-2 text-[9px] font-semibold uppercase tracking-[0.24em] text-dim">
                     {activeTip.category}
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1">
                   {WELCOME_TIPS.map((_, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setTipIndex(idx)}
-                      className={`rounded-full transition-all duration-300 ${
-                        idx === tipIndex ? "h-1.5 w-7 bg-accent" : "h-1.5 w-1.5 bg-white/10 hover:bg-white/25"
-                      }`}
+                    <button key={idx} onClick={() => setTipIndex(idx)}
+                      className={`rounded-full transition-all duration-300 ${idx === tipIndex ? "h-1 w-5 bg-accent" : "h-1 w-1 bg-white/10 hover:bg-white/25"}`}
                     />
                   ))}
                 </div>
               </div>
 
-              <div className="relative mt-6 rounded-[1.4rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <div className="relative mt-3 rounded-xl bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                 <AnimatePresence mode="wait">
-                  <motion.div
-                    key={tipIndex}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    transition={spring.snappy}
+                  <motion.div key={tipIndex}
+                    initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }} transition={spring.snappy}
                   >
-                    <div className="flex items-start gap-4">
-                      <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.24),rgba(255,255,255,0.05))] text-accent shadow-[0_12px_32px_rgba(var(--accent-glow-rgb),0.18)]">
-                        <TipIcon size={20} stroke={1.7} />
+                    <div className="flex items-start gap-3">
+                      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.24),rgba(255,255,255,0.05))] text-accent shadow-[0_6px_16px_rgba(var(--accent-glow-rgb),0.18)]">
+                        <TipIcon size={14} stroke={1.7} />
                       </div>
                       <div>
-                        <div className="text-[13px] font-semibold uppercase tracking-[0.22em] text-accent/80">
-                          {activeTip.accent}
-                        </div>
-                        <h3 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-ink">
-                          {activeTip.title}
-                        </h3>
-                        <p className="mt-3 text-[15px] leading-7 text-dim">
-                          {activeTip.desc}
-                        </p>
+                        <div className="text-[9px] font-semibold uppercase tracking-[0.22em] text-accent/80">{activeTip.accent}</div>
+                        <h3 className="mt-1 text-[14px] font-semibold tracking-[-0.03em] text-ink">{activeTip.title}</h3>
+                        <p className="mt-1.5 text-[11px] leading-[1.55] text-dim">{activeTip.desc}</p>
                       </div>
                     </div>
                   </motion.div>
                 </AnimatePresence>
               </div>
 
-              <div className="relative mt-4 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-2xl depth-chip px-4 py-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-dim">Prompt Style</div>
-                  <div className="mt-1 text-sm text-ink">Direct, specific asks work best.</div>
+              <div className="relative mt-2 grid gap-2 sm:grid-cols-3">
+                <div className="rounded-xl depth-chip px-2.5 py-2">
+                  <div className="text-[8px] font-semibold uppercase tracking-[0.2em] text-dim">Prompt Style</div>
+                  <div className="mt-0.5 text-[11px] text-ink">Direct, specific asks work best.</div>
                 </div>
-                <div className="rounded-2xl depth-chip px-4 py-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-dim">Best Flow</div>
-                  <div className="mt-1 text-sm text-ink">Survey, decide, then batch edits.</div>
+                <div className="rounded-xl depth-chip px-2.5 py-2">
+                  <div className="text-[8px] font-semibold uppercase tracking-[0.2em] text-dim">Best Flow</div>
+                  <div className="mt-0.5 text-[11px] text-ink">Survey, decide, then batch edits.</div>
                 </div>
-                <div className="rounded-2xl depth-chip px-4 py-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-dim">Current Workspace</div>
-                  <div className="mt-1 truncate text-sm text-ink">{workspace}</div>
+                <div className="rounded-xl depth-chip px-2.5 py-2">
+                  <div className="text-[8px] font-semibold uppercase tracking-[0.2em] text-dim">Workspace</div>
+                  <div className="mt-0.5 truncate text-[11px] text-ink">{workspace}</div>
                 </div>
               </div>
 
-              <div className="relative mt-auto flex items-center justify-between pt-5">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-dim">
+              <div className="relative mt-auto flex items-center justify-between pt-3">
+                <div className="text-[9px] uppercase tracking-[0.22em] text-dim">
                   {tipIndex + 1} / {WELCOME_TIPS.length}
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setTipIndex((prev) => (prev - 1 + WELCOME_TIPS.length) % WELCOME_TIPS.length)}
-                    className="grid h-10 w-10 place-items-center rounded-2xl depth-chip text-dim transition-colors hover:text-ink"
-                  >
-                    <ChevronRight size={14} stroke={1.7} className="rotate-180" />
+                <div className="flex gap-1.5">
+                  <button onClick={() => setTipIndex((prev) => (prev - 1 + WELCOME_TIPS.length) % WELCOME_TIPS.length)}
+                    className="grid h-7 w-7 place-items-center rounded-xl depth-chip text-dim transition-colors hover:text-ink">
+                    <ChevronRight size={11} stroke={1.7} className="rotate-180" />
                   </button>
-                  <button
-                    onClick={() => setTipIndex((prev) => (prev + 1) % WELCOME_TIPS.length)}
-                    className="grid h-10 w-10 place-items-center rounded-2xl text-white shadow-[0_14px_36px_rgba(var(--accent-glow-rgb),0.22)]"
-                    style={{ background: TEAL_GRADIENT }}
-                  >
-                    <ChevronRight size={14} stroke={1.9} />
+                  <button onClick={() => setTipIndex((prev) => (prev + 1) % WELCOME_TIPS.length)}
+                    className="grid h-7 w-7 place-items-center rounded-xl text-white shadow-[0_8px_20px_rgba(var(--accent-glow-rgb),0.22)]"
+                    style={{ background: TEAL_GRADIENT }}>
+                    <ChevronRight size={11} stroke={1.9} />
                   </button>
                 </div>
               </div>

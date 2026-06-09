@@ -3,44 +3,68 @@
 </p>
 
 <h1 align="center">JCut.AI</h1>
+<h2 align="center">Your Junior Editing tool — clear the repetitive work, focus on what matters.</h2>
 
-<p align="center">An AI video editor that understands your footage and cuts it for you.</p>
+<p align="center">An editing assistant that handles the time-consuming groundwork — scanning footage, roughing in a timeline, syncing to music — so you can spend your energy on the creative decisions that actually require you.</p>
 
-You talk to it in plain language; it plans the edit, places clips on a timeline, and
-renders the result.
+> **Beta software.** JCut.AI is under active development. Expect rough edges and changes
+> between releases, and always keep independent backups of your footage.
 
-JCut.AI is modeled on the "agent + tools" architecture: a language model does the
-*reasoning* (what to cut, how to pace it) while a deterministic CLI does the *work*
-(probe media, build the timeline JSON, render with ffmpeg). The model never touches
-pixels — it orchestrates tools.
+Describe what you're going for. JCut scans your clips, assembles a starting point, and
+exports an editable Premiere Pro project. From there, it's your cut — refine pacing, adjust
+grades, mix audio, and finish it exactly the way you'd finish any project in Premiere.
 
-## Two brains, one set of hands
+JCut is modeled on the "assistant + tools" architecture: a language model interprets your
+direction and coordinates the mechanical work (scanning media, placing clips, building the
+timeline JSON, exporting the `.prproj`) while you make the calls that shape the edit. The
+model handles logistics — creative judgment stays with you.
 
-- **Claude** — runs on your Claude Max subscription via the Claude Agent SDK. No API key.
-- **Local (LM Studio)** — runs a model on your own machine (private, free). Point it at any
-  tool-calling model (Qwen, Llama 3.1, etc.).
+## Our philosophy
 
-Both drive the *same* `jc` tools CLI. Switch between them in Settings.
+**AI should empower editors, not replace them.** JCut is built to save you the hours you
+spend on repetitive, low-creativity tasks — scrubbing through footage to find a moment,
+placing every clip by hand on a blank timeline, manually syncing to a beat grid. That time
+is yours back. The taste, the story, the final call: those stay with you, always.
 
-## What it can do
+We also care about **environmental impact.** Large cloud models run in power-hungry data
+centers. That's why JCut runs great **entirely on your own machine** — no data centers, and
+**nothing leaves your computer.** Prefer the cloud? You can choose that too. The trade-offs
+are laid out honestly — the choice is always yours.
 
-- **Understand footage** — ffprobe metadata; (optional) vision + transcription.
-- **Build & edit timelines** — add/trim/arrange clips, V/A auto-linking, ripple edits,
-  transforms (fill/fit/reframe), captions, speed ramps.
-- **Cool cuts** — beat-synced cutting, J/L cuts, punch-ins, match cuts, speed-ramp whips.
-- **Music maps** — `analyze-music` extracts BPM, a beat grid, and energy sections so the
-  agent can pace edits to the song.
+## Where the AI runs
+
+JCut never forces you into the cloud. Pick the setup that fits you:
+
+- **Single-Local** *(default, recommended)* — one local model via LM Studio. Private, free,
+  works offline, and gentle on weaker Macs.
+- **Dual-Local** — separate Logic and Vision models via LM Studio for faster, cleaner runs
+  on capable hardware (16GB+ RAM).
+- **Hybrid** — Claude coordinates the reasoning; your Mac handles the repetitive scanning
+  work. Fast, high-quality, and saves most of your Claude usage.
+- **Claude** — runs on your Claude subscription via the Claude Agent SDK. No API key. The
+  most capable results out of the box, but it uses the cloud and your paid plan.
+
+Every mode drives the *same* `jc` tools CLI. Switch anytime in Settings — nothing is permanent.
+
+## What JCut handles for you
+
+- **Footage scanning** — reads metadata, (optional) transcriptions, and visual analysis so
+  you don't have to scrub through everything manually before you start.
+- **Timeline assembly** — places clips, links audio/video, handles ripple edits, reframes,
+  captions, and speed ramps based on your direction.
+- **Beat-synced cutting** — `analyze-music` extracts BPM, a beat grid, and energy sections
+  so your cuts can land on the downbeats of your soundtrack without manual sync work.
 - **Visual clip analysis** — `analyze-video` extracts shot composition, camera settle time,
-  and motion peaks so the local agent can choose better trims and cut-on-action moments.
-- **Recap videos** — a specialty: music-driven, section-paced montages with a hook,
-  escalating energy, speed-ramped highlights, and a resolved ending.
-- **Modes & presets** — built-in modes (Recap, Montage, Talking-Head, Ad, Trailer,
-  Wedding) plus your own saved presets.
-- **Learn your style** — analyze your past cuts (or a Premiere project) for pacing, shot
-  length, and B-roll habits. Run it repeatedly with `--name` to learn several styles.
+  and motion peaks to help find cleaner trim points and cut-on-action moments.
+- **Intelligent first cuts** — built-in modes for common formats: Recap, Montage,
+  Talking-Head, Ad, Trailer, Wedding. Add your own presets to match your workflow.
+- **Style memory** — analyze your past cuts (or an existing Premiere project) to learn your
+  pacing, shot length, and B-roll tendencies. The more you use it, the more it sounds
+  like you.
 - **Continue existing timelines** — import a Premiere `.prproj` as an editable sequence
-  and keep editing (offline media is preserved; relinks when the drive reconnects).
-- **Render** — composite + encode to mp4 via ffmpeg; single-frame previews for verification.
+  and keep working (offline media is preserved; relinks when the drive reconnects).
+- **Export to Premiere Pro** — every sequence exports as a fully editable `.prproj`. Open
+  it in Premiere, refine, grade, mix, and deliver. It's your project from start to finish.
 
 ## Storage: symlink-only
 
@@ -107,10 +131,26 @@ npm run dist               # builds JCut.AI.app + a DMG into app/release/
 
 ## Requirements
 
-- macOS, Node 20+
-- ffmpeg / ffprobe on PATH (`brew install ffmpeg`)
-- For Claude: the `claude` CLI logged into your Max plan
-- For Local: LM Studio with a tool-calling model and the server running
+### System compatibility
+
+| Requirement | Minimum |
+|---|---|
+| **Mac** | Apple Silicon (M1 or later) — Intel Macs are not supported |
+| **macOS** | 13 Ventura or later |
+| **RAM** | 16 GB unified memory for Single-Local and Dual-Local modes |
+| **Storage** | ~10 GB free for a single AI model download (varies by model) |
+| **Node.js** | 20+ |
+
+> **Why Apple Silicon only?** Local AI models use the Metal GPU backend for fast on-device
+> inference. The performance and unified-memory architecture of M-series chips is what makes
+> running a capable model locally practical. Intel Macs lack the memory bandwidth to run
+> these models at a usable speed.
+
+### Additional dependencies
+
+- `ffmpeg` / `ffprobe` on PATH — `brew install ffmpeg`
+- **For Claude mode:** the `claude` CLI, logged into an Anthropic Max plan
+- **For Local / Hybrid modes:** LM Studio with a tool-calling model loaded and the server running
 
 ## Legal and acknowledgements
 
@@ -130,4 +170,4 @@ use. Treat that model as review-required before shipping a commercial build.
 
 ---
 
-Built as a learning project: how AI agents can interpret and edit footage.
+Built for editors who want to spend more time on the decisions that actually require them.

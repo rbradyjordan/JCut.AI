@@ -1008,12 +1008,20 @@ function AboutSection({ onReplayOnboarding }: { onReplayOnboarding?: () => void 
       <div className="flex flex-col items-center gap-4 py-4">
         <img src={iconUrl} className="h-16 w-16" alt="JCut.AI" />
         <div className="text-center">
-          <div className="text-lg font-semibold">JCut.AI</div>
-          <div className="text-sm text-dim">Version 0.1.0</div>
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-lg font-semibold">JCut.AI</span>
+            <span className="rounded-pill bg-accent/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-accent ring-1 ring-accent/25">Beta</span>
+          </div>
+          <div className="text-sm text-dim">Version 0.1.0 · Beta</div>
         </div>
         <p className="max-w-sm text-center text-sm text-dim">
           An AI video editor that understands your footage and cuts it for you.
           Built on Claude and FFmpeg.
+        </p>
+        <p className="flex items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-left text-[12px] text-amber-300 ring-1 ring-amber-500/20">
+          <Warning size={14} stroke={1.5} className="mt-px shrink-0" />
+          This is beta software under active development. Expect bugs and changes between
+          updates, and keep independent backups of your footage.
         </p>
         {onReplayOnboarding && (
           <button

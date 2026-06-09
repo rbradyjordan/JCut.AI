@@ -8,6 +8,7 @@ export type Backend = "claude" | "local";
 
 export interface AppSettings {
   onboarded: boolean;
+  termsAccepted: boolean;
   backend: Backend;
   localMode: "single" | "dual";
   theme: "dark" | "light" | "system";
@@ -50,7 +51,8 @@ export interface AppSettings {
 
 const DEFAULTS: AppSettings = {
   onboarded: false,
-  backend: "claude",
+  termsAccepted: false,
+  backend: "local",
   localMode: "single",
   theme: "system",
   accent: "teal",

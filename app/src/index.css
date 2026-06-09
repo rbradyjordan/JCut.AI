@@ -135,3 +135,52 @@ body {
 
 .drag    { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+
+/* Titlebar gradient — a slim accent wash across the very top of the window, sat
+   just below the macOS traffic lights. In fullscreen the lights hide, so it
+   spans the full width and gives the chrome a finished, branded edge. */
+.titlebar-grad::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--accent-glow-rgb), 0.55) 22%,
+    rgba(var(--accent-glow-rgb), 0.85) 50%,
+    rgba(var(--accent-glow-rgb), 0.55) 78%,
+    transparent 100%
+  );
+  opacity: 0.7;
+}
+/* In fullscreen the traffic lights disappear, so brighten and thicken slightly. */
+:fullscreen .titlebar-grad::after,
+:root:fullscreen .titlebar-grad::after {
+  height: 4px;
+  opacity: 1;
+}
+
+/* Onboarding internal scroll area — fades content at the top/bottom edges so a
+   scrollable region reads as "more below" without a hard cut. The fade depth is
+   driven by --fade-top / --fade-bottom (px), toggled by JS as you scroll so the
+   fade only shows on the side that actually has hidden content. */
+.onb-scroll {
+  overflow-y: auto;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top, 0px),
+    #000 calc(100% - var(--fade-bottom, 0px)),
+    transparent 100%
+  );
+          mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top, 0px),
+    #000 calc(100% - var(--fade-bottom, 0px)),
+    transparent 100%
+  );
+  transition: --fade-top 0.2s ease, --fade-bottom 0.2s ease;
+}

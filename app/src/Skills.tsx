@@ -195,6 +195,9 @@ export default function Skills({ workspace, settings, onSettingsChange, onChange
                       return;
                     }
                     const rect = e.currentTarget.getBoundingClientRect();
+                    // Only menu-bearing skills render this button, so skill.id is
+                    // never the menu-less "memory" — narrow for the typechecker.
+                    if (skill.id === "memory") return;
                     setMenu(skill.id);
                     setMenuPosition({ left: rect.left, top: rect.bottom + 8, bottom: rect.top - 8 });
                   }}

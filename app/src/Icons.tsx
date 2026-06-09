@@ -2,6 +2,7 @@
 // Import from this file (not tabler directly) so renaming stays in one place.
 export {
   IconChevronDown   as ChevronDown,
+  IconChevronLeft   as ChevronLeft,
   IconChevronRight  as ChevronRight,
   IconX             as Close,
   IconSettings      as Settings,
