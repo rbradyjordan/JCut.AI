@@ -16,7 +16,7 @@
 // Placeholders: __PROJECT_NAME__ (prefix), __A1_TRACK_UID__ (mixer).
 
 export const PROJECT_PREFIX = `	<Project ObjectRef="1"/>
-	<Project ObjectID="1" ClassID="62ad66dd-0dcd-42da-a660-6d8fbde94876" Version="45">
+	<Project ObjectID="1" ClassID="62ad66dd-0dcd-42da-a660-6d8fbde94876" Version="42">
 		<Node Version="1">
 			<Properties Version="1">
 				<ProjectViewState.List ObjectID="2" ClassID="aab0946f-7a21-4425-8908-fafa2119e30e" Version="3">
@@ -1020,7 +1020,7 @@ export const AUDIO_MIXER = `	<AudioMixTrack ObjectID="50" ClassID="4b1d8400-e89e
 		</Track>
 		<Inlet ObjectRef="55"/>
 	</AudioMixTrack>
-	<AudioComponentChain ObjectID="51" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="4">
+	<AudioComponentChain ObjectID="51" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="3">
 		<ComponentChain Version="3">
 			<Components Version="1">
 				<Component Index="0" ObjectRef="56"/>
@@ -1047,7 +1047,7 @@ export const AUDIO_MIXER = `	<AudioMixTrack ObjectID="50" ClassID="4b1d8400-e89e
 			</AudioComponent>
 		</PanProcessor>
 	</StereoToStereoPanProcessor>
-	<AudioComponentChain ObjectID="53" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="4">
+	<AudioComponentChain ObjectID="53" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="3">
 		<ComponentChain Version="3">
 			<Node Version="1">
 				<Properties Version="1">
@@ -1079,7 +1079,7 @@ export const AUDIO_MIXER = `	<AudioMixTrack ObjectID="50" ClassID="4b1d8400-e89e
 		<DefaultPannerOutputChannelType>1</DefaultPannerOutputChannelType>
 		<DefaultPannerInputChannelType>1</DefaultPannerInputChannelType>
 	</DefaultPanProcessor>
-	<AudioTrackInlet ObjectID="55" ClassID="be3af080-e8c6-11d5-abc4-a1c6d5dee670" Version="4">
+	<AudioTrackInlet ObjectID="55" ClassID="be3af080-e8c6-11d5-abc4-a1c6d5dee670" Version="3">
 		<Sources Version="1">
 			<Source Index="0" ObjectURef="__A1_TRACK_UID__"/>
 		</Sources>
@@ -1112,7 +1112,7 @@ export const AUDIO_MIXER = `	<AudioMixTrack ObjectID="50" ClassID="4b1d8400-e89e
 			<ChannelType>1</ChannelType>
 		</AudioComponent>
 	</AudioMeter>
-	<AudioComponentParam ObjectID="58" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="10">
+	<AudioComponentParam ObjectID="58" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="9">
 		<StartKeyframe>-91445760000000000,0.5,0,0,0,0,0,0</StartKeyframe>
 		<CurrentValue>0.5</CurrentValue>
 		<IsInverted>true</IsInverted>
@@ -1144,23 +1144,23 @@ export const AUDIO_MIXER = `	<AudioMixTrack ObjectID="50" ClassID="4b1d8400-e89e
 			<ChannelType>1</ChannelType>
 		</AudioComponent>
 	</AudioMeter>
-	<AudioComponentParam ObjectID="61" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="10">
+	<AudioComponentParam ObjectID="61" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="9">
 		<RangeLocked>false</RangeLocked>
 		<UnitsString>dB</UnitsString>
 		<UpperBound>5.6234130859375</UpperBound>
 		<Name>Volume</Name>
 	</AudioComponentParam>
-	<AudioComponentParam ObjectID="62" ClassID="32657501-3aa4-445f-a49b-d09ecb9fa1ae" Version="10">
+	<AudioComponentParam ObjectID="62" ClassID="32657501-3aa4-445f-a49b-d09ecb9fa1ae" Version="9">
 		<RangeLocked>false</RangeLocked>
 		<Name>Mute</Name>
 	</AudioComponentParam>
-	<AudioComponentParam ObjectID="63" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="10">
+	<AudioComponentParam ObjectID="63" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="9">
 		<RangeLocked>false</RangeLocked>
 		<UnitsString>dB</UnitsString>
 		<UpperBound>5.6234130859375</UpperBound>
 		<Name>Volume</Name>
 	</AudioComponentParam>
-	<AudioComponentParam ObjectID="64" ClassID="32657501-3aa4-445f-a49b-d09ecb9fa1ae" Version="10">
+	<AudioComponentParam ObjectID="64" ClassID="32657501-3aa4-445f-a49b-d09ecb9fa1ae" Version="9">
 		<RangeLocked>false</RangeLocked>
 		<Name>Mute</Name>
 	</AudioComponentParam>

@@ -753,7 +753,7 @@ export function buildPrprojXml(
       .map((c, i) => `\t\t\t\t\t<TrackItem Index="${i}" ObjectRef="${clipMap.get(c.id)!.itemId}"/>\n`)
       .join("");
     parts.push(
-      `\t<AudioClipTrack ObjectUID="${audioTrackUid.get(tname)}" ClassID="097f6203-99ae-11d5-84f2-8cf14bde7040" Version="7">\n` +
+      `\t<AudioClipTrack ObjectUID="${audioTrackUid.get(tname)}" ClassID="097f6203-99ae-11d5-84f2-8cf14bde7040" Version="6">\n` +
       `\t\t<ClipTrack Version="2">\n` +
       `\t\t\t<Track Version="3">\n` +
       `\t\t\t\t<Node Version="1"><Properties Version="1">\n` +
