@@ -345,7 +345,7 @@ export interface PrprojExportResult {
 }
 
 // Build the .prproj XML for a single sequence, matching the exact Premiere Pro
-// object graph (verified against real caltools output Premiere accepts).
+// object graph (verified against real Premiere project files it accepts).
 //
 // The format is a flat list of sibling top-level objects under <PremiereData>,
 // cross-referenced by ObjectID (integer, via ObjectRef) or ObjectUID (UUID, via

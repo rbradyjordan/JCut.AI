@@ -385,9 +385,15 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
   return new Promise((resolve) => {
     const winId = BrowserWindow.fromWebContents(e.sender)?.id ?? -1;
     // STEERING: if a run is already in flight for this window, kill it before
-    // starting the new one (the renderer also stops it, but be defensive).
+    // starting the new one. CRITICAL: mark the old child as superseded so its
+    // close→finish does NOT fire "agent-done" — otherwise the renderer clears
+    // busy/handlers and the NEW run's output (and follow-up messages) go nowhere.
     const existing = agentProcs.get(winId);
-    if (existing) { killTree(existing); agentProcs.delete(winId); }
+    if (existing) {
+      (existing as any).__superseded = true;
+      killTree(existing);
+      agentProcs.delete(winId);
+    }
 
     // detached: own process group, so stop can kill the whole tree (incl. ffmpeg
     // grandchildren) — otherwise a render keeps running after the agent is stopped.
@@ -410,6 +416,10 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
       // Only clear the map slot if it's STILL this child — a newer (steering) run
       // may have already replaced it; don't delete the new run's entry.
       if (agentProcs.get(winId) === child) agentProcs.delete(winId);
+      // If a newer run superseded this one (steering/follow-up), DO NOT emit
+      // agent-done — that would clear the new run's busy state and orphan its
+      // output. The new run owns the "done" lifecycle now.
+      if ((child as any).__superseded) { resolve({ ok: false }); return; }
       if (errMsg) send("agent-chunk", `\n⚠️ ${errMsg}\n`);
       send("agent-done", String(code ?? 0)); // ALWAYS fire so the UI clears "busy"
       resolve({ ok: code === 0 });

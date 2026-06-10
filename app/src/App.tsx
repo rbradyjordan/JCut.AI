@@ -82,6 +82,48 @@ const SUGGESTIONS = [
   "Export my sequence to Premiere",
 ];
 
+// ── AI engine modes ──────────────────────────────────────────────────────────
+// The effective engine is a combination of backend + hybridMode + localMode.
+// We surface all four as discrete, switchable modes in the top pill + dropdown.
+const CLAUDE_COLOR = "#D97757"; // Anthropic orange
+const LOCAL_COLOR = "#2E6BE6";  // blue
+// Hybrid blends Claude orange + the local green into one dot (a gradient swatch).
+const HYBRID_COLOR = `linear-gradient(135deg, #10b981 0%, ${CLAUDE_COLOR} 100%)`;
+// Text color for hybrid (can't gradient text cleanly in the pill) — a teal-amber midpoint.
+const HYBRID_TEXT = "#7DA36A";
+type ModeId = "claude" | "hybrid" | "single-local" | "dual-local";
+const MODE_OPTIONS: { id: ModeId; label: string; color: string; text?: string; patch: Partial<AppSettings> }[] = [
+  { id: "claude",       label: "Claude",       color: CLAUDE_COLOR,  patch: { backend: "claude", hybridMode: false } },
+  { id: "hybrid",       label: "Hybrid",       color: HYBRID_COLOR, text: HYBRID_TEXT, patch: { backend: "claude", hybridMode: true } },
+  { id: "single-local", label: "Single-Local", color: LOCAL_COLOR,   patch: { backend: "local", hybridMode: false, localMode: "single" } },
+  { id: "dual-local",   label: "Dual-Local",   color: LOCAL_COLOR,   patch: { backend: "local", hybridMode: false, localMode: "dual" } },
+];
+function activeMode(s: AppSettings): { id: ModeId; label: string; color: string; text: string } {
+  if (s.backend === "claude") {
+    return s.hybridMode
+      ? { id: "hybrid", label: "Hybrid", color: HYBRID_COLOR, text: HYBRID_TEXT }
+      : { id: "claude", label: "Claude", color: CLAUDE_COLOR, text: CLAUDE_COLOR };
+  }
+  return s.localMode === "dual"
+    ? { id: "dual-local", label: "Dual-Local", color: LOCAL_COLOR, text: LOCAL_COLOR }
+    : { id: "single-local", label: "Single-Local", color: LOCAL_COLOR, text: LOCAL_COLOR };
+}
+function isModeActive(s: AppSettings, id: ModeId): boolean {
+  return activeMode(s).id === id;
+}
+// One-line summary of which models that mode uses, given current settings.
+function modeModels(s: AppSettings, id: ModeId): string {
+  const claude = s.claudeAccount ? `Claude (${s.claudeModel})` : `Claude (${s.claudeModel}) — sign in`;
+  const coder = s.lmStudioCoderModel || "no model loaded";
+  const vision = s.lmStudioVisionModel || s.lmStudioCoderModel || "no model loaded";
+  switch (id) {
+    case "claude":       return claude;
+    case "hybrid":       return `${claude} + local execution`;
+    case "single-local": return `Local: ${coder}`;
+    case "dual-local":   return `Logic: ${coder} · Vision: ${vision}`;
+  }
+}
+
 export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [mode, setModeState] = useState<Mode>("dark");
@@ -264,10 +306,14 @@ export default function App() {
     // of in-progress work (otherwise it loses all context and starts over / derails).
     const steering = busy;
     if (busy) {
+      // Tear down the CURRENT run's listeners and bump the generation so any late
+      // events from the old run are ignored. We do NOT call stopAgent() here — the
+      // backend's runAgent supersedes (kills) the old process itself and suppresses
+      // its agent-done, so a separate stop would just race. The new run starts below.
       runGenRef.current += 1;
       runCleanupRef.current?.();
       runCleanupRef.current = null;
-      window.jcut.stopAgent().catch(() => {});
+      streamRef.current = "";
       setMessages((m) => {
         const copy = [...m];
         const last = copy[copy.length - 1];
@@ -482,48 +528,63 @@ export default function App() {
                 </motion.button>
               )}
 
-              {/* Workspace + backend pill — click the backend to switch local/Claude */}
+              {/* Workspace + AI-mode pill — click the mode to switch between the
+                  four engines (Claude / Hybrid / Single-Local / Dual-Local) and
+                  see which models are actually loaded. */}
               <div className="relative flex items-center gap-1.5 rounded-lg depth-chip px-2.5 py-1 ">
                 <img src={iconUrl} alt="" className="h-4 w-4 opacity-80" />
                 <span className="text-[12px] font-medium text-ink">{workspace}</span>
                 <span className="h-3 w-px bg-line" />
-                <button
-                  onClick={() => setBackendMenuOpen((o) => !o)}
-                  disabled={busy}
-                  title={busy ? "Finish the current run before switching" : "Switch model (Claude / Local)"}
-                  className="flex items-center gap-1 text-[11px] font-medium disabled:opacity-50"
-                >
-                  {/* Solid color, not a background-clip:text gradient — the gradient
-                      trick renders as a solid block during re-renders (the glitch).
-                      Claude = Anthropic's signature orange; Local = blue accent. */}
-                  <span style={{ color: settings.backend === "claude" ? "#D97757" : "var(--accent-blue)" }}>
-                    {settings.backend === "claude" ? "Claude" : "Local"}
-                  </span>
-                  <ChevronRight size={10} stroke={1.5} className="rotate-90 text-dim" />
-                </button>
+                {(() => {
+                  const mode = activeMode(settings);
+                  return (
+                    <button
+                      onClick={() => setBackendMenuOpen((o) => !o)}
+                      disabled={busy}
+                      title={busy ? "Finish the current run before switching" : "Switch AI engine"}
+                      className="flex items-center gap-1.5 text-[11px] font-medium disabled:opacity-50"
+                    >
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: mode.color }} />
+                      <span style={{ color: mode.text }}>{mode.label}</span>
+                      <ChevronRight size={10} stroke={1.5} className="rotate-90 text-dim" />
+                    </button>
+                  );
+                })()}
                 <AnimatePresence>
                   {backendMenuOpen && (
                     <>
-                      {/* click-away */}
                       <div className="fixed inset-0 z-40" onClick={() => setBackendMenuOpen(false)} />
                       <motion.div
                         initial={{ opacity: 0, y: -4, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: -4, scale: 0.97 }} transition={spring.soft}
-                        className="absolute left-0 top-full z-50 mt-1.5 w-36 overflow-hidden rounded-lg depth-card p-1 shadow-xl"
+                        className="absolute left-0 top-full z-50 mt-1.5 w-64 overflow-hidden rounded-xl depth-card p-1.5 shadow-xl"
                       >
-                        {(["claude", "local"] as Backend[]).map((b) => (
-                          <button
-                            key={b}
-                            onClick={() => { patch({ backend: b }); setBackendMenuOpen(false); }}
-                            className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[12px] transition-colors hover:bg-surface2 ${settings.backend === b ? "text-ink" : "text-dim"}`}
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <span className="h-1.5 w-1.5 rounded-full" style={{ background: b === "claude" ? "#D97757" : "var(--accent-blue)" }} />
-                              {b === "claude" ? "Claude" : "Local"}
-                            </span>
-                            {settings.backend === b && <span className="text-accent">✓</span>}
-                          </button>
-                        ))}
+                        {MODE_OPTIONS.map((opt) => {
+                          const active = isModeActive(settings, opt.id);
+                          const sub = modeModels(settings, opt.id);
+                          return (
+                            <button
+                              key={opt.id}
+                              onClick={() => { patch(opt.patch); setBackendMenuOpen(false); }}
+                              className={`flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${active ? "bg-surface2" : "hover:bg-surface2/60"}`}
+                            >
+                              <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: opt.color }} />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center gap-1.5">
+                                  <span className={`text-[12px] font-semibold ${active ? "text-ink" : "text-dim"}`}>{opt.label}</span>
+                                  {active && <span className="text-[10px] text-accent">✓</span>}
+                                </span>
+                                <span className="mt-0.5 block truncate text-[10.5px] text-dim">{sub}</span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                        <button
+                          onClick={() => { setBackendMenuOpen(false); setShowSettings(true); }}
+                          className="mt-1 flex w-full items-center gap-2 border-t border-line px-2.5 py-2 text-[11px] text-dim transition-colors hover:text-ink"
+                        >
+                          <SettingsIcon size={12} stroke={1.5} /> Configure models…
+                        </button>
                       </motion.div>
                     </>
                   )}
