@@ -1,0 +1,186 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0D0D0F;
+  --bg-grad: radial-gradient(120% 80% at 50% 120%, #0c1633 0%, #0D0D0F 55%);
+  --surface: #16171B;
+  --surface-2: #1E2026;
+  --border: rgba(255,255,255,0.06);
+  --text: #F4F5F7;
+  --text-dim: #9BA0AA;
+  --accent: #23C6A2;
+  --accent-deep: #12A98C;
+  --accent-blue: #2E6BE6;
+  --accent-glow-rgb: 46, 198, 162;
+  --accent-grad: linear-gradient(135deg, #23C6A2 0%, #12A98C 100%);
+  --accent-grad-alt: linear-gradient(135deg, #2E6BE6 0%, #034EA6 100%);
+  --shadow: 0 12px 40px rgba(0,0,0,0.55);
+  --glow: 0 0 60px rgba(46,198,162,0.28);
+  /* Gradient card fills — subtle light-to-dark sheen */
+  --card-grad: linear-gradient(145deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+  --card-grad-hover: linear-gradient(145deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.02) 100%);
+
+  /* ── User customization (Display & feel) ──────────────────────────────
+     All Tailwind spacing/sizing is rem-based, so scaling the root font-size
+     scales the WHOLE UI uniformly. --density and --font-scale multiply into
+     it. --radius-scale tunes corner roundness; --ui-font swaps the typeface;
+     --grain-opacity toggles the film grain. JS sets these via applyDisplay(). */
+  --density: 1;        /* compact 0.92 · comfortable 1 · spacious 1.08 */
+  --font-scale: 1;     /* small 0.94 · default 1 · large 1.1 */
+  --radius-scale: 1;   /* sharp 0.5 · default 1 · round 1.6 */
+  --grain-opacity: 0.055;
+  --ui-font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  /* 16px base × density × text-size → every rem-based size follows along. */
+  font-size: calc(16px * var(--density) * var(--font-scale));
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ui-font);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  transition: background 0.5s ease, color 0.4s ease;
+}
+
+/* Reduce motion — when enabled, collapse all transitions/animations so the UI
+   snaps instead of springs. Framer Motion also reads this via applyDisplay. */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+/* Corner-radius scaling. Tailwind's rounded-* utilities use these vars via the
+   config, so one multiplier retunes the whole app's roundness. */
+
+/* Film-grain texture overlay — opacity is user-controllable (0 = off). */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+  mix-blend-mode: overlay;
+}
+
+/* Ambient gradient backdrop */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-grad);
+  transition: background 0.6s ease;
+}
+
+/* ── Depth card system — every card gets a gradient sheen ── */
+/* Base card: raised, gradient face, shadow for elevation */
+.depth-card {
+  background-color: var(--surface);
+  background-image: var(--card-grad);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.05) inset,  /* top glint */
+    0 2px 8px rgba(0,0,0,0.30),             /* close shadow */
+    0 8px 24px rgba(0,0,0,0.20);            /* ambient */
+  transition: box-shadow 0.15s ease, background-image 0.15s ease;
+}
+.depth-card:hover {
+  background-image: var(--card-grad-hover);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.07) inset,
+    0 2px 10px rgba(0,0,0,0.35),
+    0 10px 28px rgba(0,0,0,0.24);
+}
+
+/* Inner card: input fields, chips — slightly elevated from bg */
+.depth-chip {
+  background-color: var(--surface-2);
+  background-image: linear-gradient(145deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.008) 100%);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 1px 4px rgba(0,0,0,0.20);
+}
+
+/* Panel: sidebar/right panel background */
+.depth-panel {
+  background-color: var(--surface);
+  background-image: linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0.005) 60%);
+  box-shadow: 1px 0 0 rgba(255,255,255,0.04);
+}
+
+/* Scrollbars — thinner, softer */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.10);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.18);
+}
+
+.drag    { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* Titlebar gradient — a slim accent wash across the very top of the window, sat
+   just below the macOS traffic lights. In fullscreen the lights hide, so it
+   spans the full width and gives the chrome a finished, branded edge. */
+.titlebar-grad::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--accent-glow-rgb), 0.55) 22%,
+    rgba(var(--accent-glow-rgb), 0.85) 50%,
+    rgba(var(--accent-glow-rgb), 0.55) 78%,
+    transparent 100%
+  );
+  opacity: 0.7;
+}
+/* In fullscreen the traffic lights disappear, so brighten and thicken slightly. */
+:fullscreen .titlebar-grad::after,
+:root:fullscreen .titlebar-grad::after {
+  height: 4px;
+  opacity: 1;
+}
+
+/* Onboarding internal scroll area — fades content at the top/bottom edges so a
+   scrollable region reads as "more below" without a hard cut. The fade depth is
+   driven by --fade-top / --fade-bottom (px), toggled by JS as you scroll so the
+   fade only shows on the side that actually has hidden content. */
+.onb-scroll {
+  overflow-y: auto;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top, 0px),
+    #000 calc(100% - var(--fade-bottom, 0px)),
+    transparent 100%
+  );
+          mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top, 0px),
+    #000 calc(100% - var(--fade-bottom, 0px)),
+    transparent 100%
+  );
+  transition: --fade-top 0.2s ease, --fade-bottom 0.2s ease;
+}

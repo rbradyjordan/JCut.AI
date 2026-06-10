@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+app/node_modules/
+
+# Build output
+dist/
+app/dist-web/
+app/dist-electron/
+
+# Packaged app + installers (large binaries)
+app/release/
+build/icon.icns
+
+# Workspaces / user data (never commit footage or projects)
+workspaces/
+*.wfseq.json
+*.jcseq.json
+
+# OS / editor
+.DS_Store
+*.log
+/tmp/
+
+# Env / secrets
+.env
+.env.local
+*.local
