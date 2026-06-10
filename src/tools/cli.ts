@@ -31,7 +31,7 @@ import {
   parseTranscriptFile, saveTranscript, listTranscripts, loadTranscript, searchCues,
 } from "./transcript.js";
 import {
-  Sequence, sequenceDuration, Orientation, orientationCanvas, orientationOf,
+  Sequence, SequenceMarker, MarkerColor, sequenceDuration, Orientation, orientationCanvas, orientationOf,
   fillTransform, isVideoTrack,
 } from "./model.js";
 import { promises as fs } from "node:fs";
@@ -389,6 +389,54 @@ async function main() {
         const ws = a.workspace || fail("--workspace required");
         const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
         emit({ ok: true, transitions: seq.transitions || [] });
+        break;
+      }
+
+      case "sequence-markers-add": {
+        // Add one or more colored label markers to the sequence timeline.
+        // Markers appear in Premiere's timeline and Program Monitor as colored dots
+        // with text, useful for annotating content sections, shot groups, subjects.
+        //
+        //   --workspace W --sequence-id ID
+        //   --markers '[{"time_seconds":0,"label":"Opening","color":"green"}, ...]'
+        //
+        // color: red | orange | yellow | green | cyan | blue | violet | white
+        const ws = a.workspace || fail("--workspace required");
+        const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        const raw: SequenceMarker[] = (() => {
+          try { return JSON.parse(a.markers || "[]"); } catch { fail("--markers must be valid JSON"); }
+        })();
+        if (!raw.length) fail("--markers must contain at least one marker");
+        const valid: SequenceMarker[] = raw.map((m, i) => {
+          if (typeof m.time_seconds !== "number") fail(`marker[${i}]: time_seconds required`);
+          if (!m.label?.trim()) fail(`marker[${i}]: label required`);
+          const id = m.id || `m-${Date.now()}-${i}`;
+          const color: MarkerColor = (["red","orange","yellow","green","cyan","blue","violet","white"].includes(m.color || "")) ? m.color! : "green";
+          return { id, time_seconds: m.time_seconds, duration_seconds: m.duration_seconds ?? 0, label: m.label.trim(), color };
+        });
+        seq.markers = [...(seq.markers || []), ...valid];
+        await saveSequence(ws, seq);
+        emit({ ok: true, added: valid.length, markers: seq.markers });
+        break;
+      }
+
+      case "sequence-markers-remove": {
+        // Remove markers by id.  --workspace W --sequence-id ID --ids '["m-1","m-2"]'
+        const ws = a.workspace || fail("--workspace required");
+        const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        const ids: string[] = (() => { try { return JSON.parse(a.ids || "[]"); } catch { return []; } })();
+        const before = (seq.markers || []).length;
+        seq.markers = (seq.markers || []).filter((m) => !ids.includes(m.id));
+        await saveSequence(ws, seq);
+        emit({ ok: true, removed: before - seq.markers.length, markers: seq.markers });
+        break;
+      }
+
+      case "sequence-markers-list": {
+        // List all markers on a sequence.  --workspace W --sequence-id ID
+        const ws = a.workspace || fail("--workspace required");
+        const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        emit({ ok: true, markers: seq.markers || [] });
         break;
       }
 
@@ -1263,7 +1311,8 @@ async function main() {
           `sequence-inspect, media-info, sequence-clips-add, sequence-clips-update, ` +
           `sequence-clips-remove, sequence-captions-add, sequence-captions-remove, ` +
           `sequence-captions-list, sequence-transitions-add, sequence-transitions-remove, ` +
-          `sequence-transitions-list, sequence-export-premiere, sequence-import-prproj, ` +
+          `sequence-transitions-list, sequence-markers-add, sequence-markers-remove, ` +
+          `sequence-markers-list, sequence-export-premiere, sequence-import-prproj, ` +
           `prproj-analyze, sequence-reframe, sequence-analyze, style-learn, ` +
           `media-frames, media-frames-batch, content-set, content-list, ` +
           `source-add, sources-list, source-localize, source-remove, source-relink, ` +

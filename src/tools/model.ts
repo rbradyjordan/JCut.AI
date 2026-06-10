@@ -122,6 +122,20 @@ export interface Transition {
   easing: TransitionEasing;
 }
 
+// ── Sequence markers (colored notes on the timeline) ─────────────────────────
+// Appear as colored labels in Premiere's timeline and Program Monitor. Use them
+// to annotate sections: content categories, shot groups, subject changes, etc.
+export type MarkerColor =
+  | "red" | "orange" | "yellow" | "green" | "cyan" | "blue" | "violet" | "white";
+
+export interface SequenceMarker {
+  id: string;
+  time_seconds: number;        // position on the sequence timeline
+  duration_seconds?: number;   // 0 = instant point marker; >0 = range marker
+  label: string;               // text shown in the marker tooltip
+  color?: MarkerColor;         // colored dot; defaults to "green"
+}
+
 export interface Sequence {
   id: string;
   name: string;
@@ -130,6 +144,7 @@ export interface Sequence {
   clips: Clip[];
   captions?: Caption[];
   transitions?: Transition[];
+  markers?: SequenceMarker[];
 }
 
 // Effective on-timeline duration of a clip (trim length scaled by speed).

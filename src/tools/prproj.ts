@@ -260,7 +260,7 @@ function round(n: number): number { return Math.round(n * 100) / 100; }
 //
 // Timing: 254016000000 ticks/second (Premiere constant). All <Start>/<End>/
 // <InPoint>/<OutPoint> values are BigInt ticks.
-import { Sequence, Clip, Caption, Transition, isVideoTrack, clipTimelineDuration } from "./model.js";
+import { Sequence, Clip, Caption, Transition, SequenceMarker, MarkerColor, isVideoTrack, clipTimelineDuration } from "./model.js";
 import { promises as fsp, existsSync } from "node:fs";
 import zlibFull from "node:zlib";
 import path from "node:path";
@@ -334,6 +334,13 @@ const TRANSITION_ALIGNMENT: Record<string, number> = {
 };
 const TRANSITION_EASING: Record<string, number> = {
   "linear": 0, "ease-in": 1, "ease-out": 2, "ease-in-out": 3,
+};
+
+// Premiere's label color integers (used in <Color> on markers).
+// These map to the colored dots in the timeline ruler.
+const MARKER_COLOR: Record<MarkerColor, number> = {
+  "red":    1,  "orange":  2,  "yellow": 3,  "green":  4,
+  "cyan":   5,  "blue":    6,  "violet": 7,  "white":  8,
 };
 
 export interface PrprojExportResult {
@@ -533,7 +540,31 @@ export function buildPrprojXml(
     else audioTrackXml.push(trackBlock);
   }
 
-  // ── 5. Captions ────────────────────────────────────────────────────────────
+  // ── 5. Sequence markers ────────────────────────────────────────────────────
+  // Colored label dots on the timeline ruler. Each marker has a comment (the
+  // label text), an In point (ticks), an optional duration (0 = instant), and
+  // a color integer. They appear in Premiere's timeline and the Markers panel.
+  const markerItems: string[] = [];
+  for (const m of (seq.markers || [])) {
+    const markId  = next();
+    const inT     = secToTicks(m.time_seconds);
+    const durT    = secToTicks(m.duration_seconds ?? 0);
+    const color   = MARKER_COLOR[m.color as MarkerColor] ?? MARKER_COLOR["green"];
+    markerItems.push(
+      `\t\t\t<Marker ObjectID="${markId}" ClassID="5255478a-c60e-11d3-9149-00c04f680b4e" Version="2">\n` +
+      `\t\t\t\t<Comment>${xmlEscape(m.label)}</Comment>\n` +
+      `\t\t\t\t<In>${inT}</In>\n` +
+      `\t\t\t\t<Duration>${durT}</Duration>\n` +
+      `\t\t\t\t<Type>0</Type>\n` +
+      `\t\t\t\t<Color>${color}</Color>\n` +
+      `\t\t\t</Marker>\n`,
+    );
+  }
+  const markersXml = markerItems.length > 0
+    ? `\t\t<Markers>\n${markerItems.join("")}\t\t</Markers>\n`
+    : "";
+
+  // ── 6. Captions ────────────────────────────────────────────────────────────
   // Emitted as a <CaptionTrack> on the sequence. Each caption becomes a
   // <CaptionItem> with timing + styling. Zone 0–8 maps to Premiere's safe-zone
   // anchor positions (7 = bottom-center = standard subtitle).
@@ -592,6 +623,7 @@ export function buildPrprojXml(
     (dropFrame ? `\t\t<DropFrame>true</DropFrame>\n` : "") +
     `\t\t<VideoTracks>\n${videoTrackXml.join("")}\t\t</VideoTracks>\n` +
     `\t\t<AudioTracks>\n${audioTrackXml.join("")}\t\t</AudioTracks>\n` +
+    markersXml +
     captionTrackXml +
     `\t</Sequence>\n`;
 

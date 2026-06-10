@@ -50,9 +50,19 @@ given to you at runtime). Every command prints JSON. Available commands:
 | `jc sequence-captions-remove/list ...` | Remove/list captions |
 | `jc sequence-transitions-add --workspace W --sequence-id ID --operations '[{...}]'` | Add transitions (validates handles) |
 | `jc sequence-transitions-remove/list ...` | Remove/list transitions |
+| `jc sequence-markers-add --workspace W --sequence-id ID --markers '[{"time_seconds":0,"label":"Opening","color":"green"}]'` | Add colored label markers to the timeline ruler |
+| `jc sequence-markers-remove/list ...` | Remove/list markers |
 | `jc transcript-import --workspace W --file <x.srt> [--name N]` | Import a Premiere/SRT/VTT transcript |
 | `jc transcript-search --workspace W --name N --query "phrase"` | Find spoken lines → exact cut timecodes |
 | `jc transcript-list / transcript-get ...` | List transcripts / get cues (optional --from/--to) |
+
+**Timeline markers** (`sequence-markers-add`): Always add colored label markers to finished sequences
+to annotate the structure. Use them for content categories, shot groups, subject changes, and
+section boundaries so the editor can navigate the timeline immediately on opening in Premiere.
+Good default colors: green = main subject, blue = B-roll, yellow = music section boundary,
+orange = transition zone, red = flagged/check this, cyan = interview/dialogue. Example:
+`--markers '[{"time_seconds":0,"label":"Opening — establish","color":"green"},{"time_seconds":12.5,"label":"B-roll — location","color":"blue"}]'`
+Add markers AFTER placing clips so time positions are accurate.
 
 `sequence-clips-add` op fields: `track` ("V1","V2","A1"...), `source` (path), `position_seconds`,
 `trim_start_seconds`, `trim_end_seconds`, optional `scale_x/scale_y`, `position_x/position_y`,
