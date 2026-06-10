@@ -268,14 +268,15 @@ export default function ChatMessage({ role, text, live, showReasoning, onCopy, o
 }
 
 function getEstDuration(text: string): number {
+  if (text.includes("Reviewing footage") || text.includes("Inspecting media")) return 25;
   if (text.includes("Analyzing the beat") || text.includes("Analyzing the music")) return 15;
-  if (text.includes("Adding") && text.includes("clip")) return 10;
   if (text.includes("Learning your editing style")) return 12;
-  if (text.includes("Exporting to Premiere")) return 6;
-  if (text.includes("Checking the footage") || text.includes("Sampling the footage") || text.includes("Surveying the footage")) return 8;
+  if (text.includes("Adding") && text.includes("clip")) return 10;
+  if (text.includes("Checking the footage") || text.includes("Sampling the footage") || text.includes("Surveying the footage")) return 10;
   if (text.includes("Importing the timeline") || text.includes("Reading the Premiere project")) return 8;
+  if (text.includes("Exporting to Premiere")) return 6;
   if (text.includes("Adjusting clips") || text.includes("Removing clips")) return 5;
-  return 3; // default for quick CLI commands
+  return 3;
 }
 
 function ProgressBar({ duration, active }: { duration: number; active: boolean }) {
@@ -289,39 +290,47 @@ function ProgressBar({ duration, active }: { duration: number; active: boolean }
     return () => clearInterval(interval);
   }, [active]);
 
-  const pct = active 
-    ? Math.min(98, Math.round((elapsed / duration) * 100)) 
+  const overrun = active && elapsed > duration;
+  const pct = active
+    ? Math.min(98, Math.round((elapsed / duration) * 100))
     : 100;
 
   const remaining = Math.max(0, duration - elapsed);
-  
   let estimateLabel = "";
   if (active) {
     if (remaining > 0) {
-      if (remaining >= 60) {
-        estimateLabel = `Est: ${Math.floor(remaining / 60)}m ${remaining % 60}s remaining`;
-      } else {
-        estimateLabel = `Est: ${remaining}s remaining`;
-      }
+      estimateLabel = remaining >= 60
+        ? `~${Math.floor(remaining / 60)}m ${remaining % 60}s`
+        : `~${remaining}s`;
     } else {
-      estimateLabel = "Finishing up…";
+      estimateLabel = "Working…";
     }
   }
 
   return (
     <div className="space-y-1 w-full mt-1.5">
       <div className="flex justify-between text-[10px] text-dim/70 font-mono">
-        <span>{pct}%</span>
+        <span>{overrun ? "—" : `${pct}%`}</span>
         {active && <span>{estimateLabel}</span>}
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-surface">
-        <motion.div 
-          className="h-full rounded-full" 
-          style={{ background: TEAL_GRADIENT }}
-          initial={{ width: "2%" }}
-          animate={{ width: `${pct}%` }}
-          transition={{ ease: "linear", duration: active ? 1 : 0.3 }}
-        />
+        {overrun ? (
+          // Indeterminate pulse — bar slides back and forth so it never looks frozen
+          <motion.div
+            className="h-full w-2/5 rounded-full"
+            style={{ background: TEAL_GRADIENT }}
+            animate={{ x: ["0%", "150%", "0%"] }}
+            transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+          />
+        ) : (
+          <motion.div
+            className="h-full rounded-full"
+            style={{ background: TEAL_GRADIENT }}
+            initial={{ width: "2%" }}
+            animate={{ width: `${pct}%` }}
+            transition={{ ease: "linear", duration: active ? 1 : 0.3 }}
+          />
+        )}
       </div>
     </div>
   );
