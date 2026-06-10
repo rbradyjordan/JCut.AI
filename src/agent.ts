@@ -167,7 +167,11 @@ async function main() {
           }
         }
       } else if (message.type === "user") {
-        bump(); // a tool RESULT came back — genuine progress
+        // A tool result came back. For vision/image reads (large model processing
+        // time) and long CLI tools, the model may take several minutes AFTER the
+        // result arrives to reason and respond. Give it the full tool grace window
+        // so we don't kill an agent that is actively thinking about the footage.
+        bump(TOOL_GRACE_MS);
       } else if (message.type === "system") {
         if (message.subtype === "task_started") {
           bump(TOOL_GRACE_MS); // a subagent can run long — give it the tool grace window
