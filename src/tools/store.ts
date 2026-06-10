@@ -61,12 +61,15 @@ export async function listSequences(workspace: string): Promise<Sequence[]> {
 
 // ── Media probing via ffprobe ────────────────────────────────────────────────
 export interface ProbeResult {
-  width?: number;
-  height?: number;
+  width?: number;      // display width (rotation already applied)
+  height?: number;     // display height (rotation already applied)
   fps?: number;
   duration?: number;
   has_audio: boolean;
   codec?: string;
+  // Rotation flag from container metadata (0, 90, 180, 270). When 90/270 the raw
+  // stream is sideways and width/height above are ALREADY swapped to display orient.
+  rotation?: number;
 }
 
 function parseFps(rate?: string): number | undefined {
@@ -133,7 +136,8 @@ export async function probeMedia(file: string): Promise<ProbeResult> {
     Number(v?.tags?.rotate) ||
     Number(v?.side_data_list?.find((s: any) => s.rotation != null)?.rotation) ||
     0;
-  if (Math.abs(rotation) === 90 || Math.abs(rotation) === 270) {
+  const absRot = ((Math.round(rotation) % 360) + 360) % 360;
+  if (absRot === 90 || absRot === 270) {
     [width, height] = [height, width];
   }
   const result: ProbeResult = {
@@ -143,6 +147,7 @@ export async function probeMedia(file: string): Promise<ProbeResult> {
     duration: Number(data.format?.duration) || Number(v?.duration) || undefined,
     has_audio: !!a,
     codec: v?.codec_name,
+    rotation: absRot || undefined,
   };
   _probeCache.set(file, result);
   // Persist for future chats/sessions (best-effort; never fail a probe over it).

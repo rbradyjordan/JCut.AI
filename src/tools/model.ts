@@ -40,8 +40,17 @@ export interface Clip {
   source_height?: number;
   source_fps?: number;
   source_duration?: number;
+  source_rotation?: number;   // 0/90/180/270 container rotation flag; dims above are display-oriented
   has_audio?: boolean;
   clip_type: "video" | "image" | "audio";
+  // Optional category label color (red|orange|yellow|green|cyan|blue|violet|white).
+  // Exported as the clip's Premiere label color so categorized clips are visually
+  // distinct in the Project panel and on the timeline.
+  label_color?: string;
+  // Optional human category/section name this clip belongs to (e.g. "Crowd/Social").
+  // Persisted so a follow-up edit reads the categorization back instead of
+  // re-surveying the footage from scratch.
+  category?: string;
 }
 
 export interface SequenceSettings {
@@ -145,6 +154,19 @@ export interface Sequence {
   captions?: Caption[];
   transitions?: Transition[];
   markers?: SequenceMarker[];
+  // Persisted categorization so follow-up edits ("include more", "rebuild") reuse
+  // the structure instead of re-scanning footage. Each section names a category, its
+  // color, time span, and (optionally) which source files belong to it.
+  categories?: SequenceCategory[];
+}
+
+export interface SequenceCategory {
+  name: string;            // "Venue/Establishing", "Crowd/Social", …
+  color?: string;          // marker/label color name
+  start_seconds?: number;  // section start on the timeline
+  end_seconds?: number;    // section end on the timeline
+  sources?: string[];      // source paths/filenames that belong to this category
+  note?: string;           // optional one-line description of the category
 }
 
 // Effective on-timeline duration of a clip (trim length scaled by speed).

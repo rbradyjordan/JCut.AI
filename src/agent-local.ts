@@ -24,7 +24,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const CLI = path.join(PROJECT_ROOT, "dist", "tools", "cli.js");
 
-const BASE_URL = process.env.LMSTUDIO_URL || "http://localhost:1234/v1";
+// Normalize the LM Studio base URL so it ALWAYS ends in /v1 (the OpenAI-compatible
+// route). Users (and the Settings UI) commonly enter just "http://localhost:1234"
+// without /v1 — posting to "<host>/chat/completions" then 404s and the model looks
+// dead ("No response from local model."). Strip any trailing slash and append /v1
+// if it isn't already the last path segment.
+function normalizeBaseUrl(raw?: string): string {
+  let u = (raw || "http://localhost:1234").trim().replace(/\/+$/, "");
+  if (!/\/v\d+$/.test(u)) u += "/v1";
+  return u;
+}
+const BASE_URL = normalizeBaseUrl(process.env.LMSTUDIO_URL);
 
 // One generic tool — small models aren't overwhelmed by a big schema.
 // CRITICAL DESIGN RULES (learned from real failures):
@@ -47,7 +57,10 @@ WORKFLOW ORDER (follow this sequence for any editing task):
 4. sequence-inspect --sequence-id ID  →  see clips and current state
 5. analyze-music --file <EXACT PATH from sources-list>  →  beat map (requires --file)
 6. sequence-clips-add --sequence-id ID --operations '[...]'  →  edit timeline
-7. sequence-export-premiere --sequence-id ID  →  write .prproj for Premiere
+7. sequence-markers-add --sequence-id ID --markers '[...]'  →  colored section markers on the ruler
+8. sequence-text-labels-add --sequence-id ID --track V2 --labels '[...]'  →  VISIBLE on-timeline text labels (renders each section title to a PNG on V2)
+9. sequence-categories-set --sequence-id ID --categories '[...]'  →  SAVE the category structure so follow-ups don't re-scan
+10. sequence-export-premiere --sequence-id ID  →  write .prproj for Premiere
 
 KEY RULES:
 - analyze-music REQUIRES --file with the exact path. ALWAYS run sources-list first to get the path.
@@ -194,6 +207,8 @@ const ALL_COMMANDS = new Set([
   "sequence-captions-add","sequence-captions-remove","sequence-captions-list",
   "sequence-transitions-add","sequence-transitions-remove","sequence-transitions-list",
   "sequence-export-premiere","sequence-import-prproj","sequence-analyze","sequence-reframe",
+  "sequence-markers-add","sequence-markers-remove","sequence-markers-list",
+  "sequence-text-labels-add","sequence-categories-set",
   "style-learn","media-frames","media-frames-batch","content-set","content-list",
   "sources-list","source-add","source-localize","source-remove","source-relink",
   "criteria-get","criteria-set","memory-read","memory-append",
@@ -209,6 +224,8 @@ const NEEDS_WORKSPACE = new Set([
   "sequence-clips-update","sequence-clips-remove","sequence-captions-add",
   "sequence-captions-remove","sequence-captions-list","sequence-transitions-add",
   "sequence-transitions-remove","sequence-transitions-list","sequence-export-premiere",
+  "sequence-markers-add","sequence-markers-remove","sequence-markers-list",
+  "sequence-text-labels-add","sequence-categories-set",
   "sequence-import-prproj","sequence-analyze","sequence-reframe","style-learn",
   "media-frames","media-frames-batch","content-set","content-list",
   "sources-list","source-add","source-localize","source-remove","source-relink",
@@ -400,16 +417,17 @@ function cleanAndTruncateToolOutput(cmd: string, output: string): string {
     }
 
     if (cmd === "sequence-inspect" && data.ok) {
-      if (data.tracks) {
-        const maxClips = 10;
-        for (const trackName of Object.keys(data.tracks)) {
-          const track = data.tracks[trackName];
-          if (Array.isArray(track.clips) && track.clips.length > maxClips) {
-            const total = track.clips.length;
-            track.clips = [...track.clips.slice(0, maxClips), { note: `... (${total - maxClips} more clips in this track truncated for context budget)` }];
-            modified = true;
-          }
-        }
+      // The CLI already returns a compact, local-friendly inspect: a per-track
+      // summary, the persisted categories/markers, and a CAPPED clip list with an
+      // explicit clips_truncated note. So DO NOT slice it further and DO NOT label
+      // it "truncated" — that exact word made small models loop, re-inspecting
+      // forever because they thought the data was incomplete. Drop the long flat
+      // clips array (the categories/markers/tracks carry the structure) and keep a
+      // short head so the model has examples without overflowing.
+      if (Array.isArray(data.clips) && data.clips.length > 12) {
+        data.clips = data.clips.slice(0, 12);
+        data.clips_note = "Clip list trimmed to 12 examples — the COMPLETE structure is in categories/markers/tracks above. This data is complete; do not re-inspect.";
+        modified = true;
       }
     }
 
@@ -420,10 +438,12 @@ function cleanAndTruncateToolOutput(cmd: string, output: string): string {
     // ignore parse error, treat as raw text
   }
 
-  // Generic string fallback slice
-  const maxChars = 3000;
+  // Generic string fallback slice. Avoid the word "TRUNCATED" — small models read
+  // it as "the data is incomplete, try again" and loop. Frame it as complete.
+  const maxChars = 3500;
   if (output.length > maxChars) {
-    return output.slice(0, maxChars) + "\n\n... [OUTPUT TRUNCATED TO FIT CONTEXT BUDGET] ...";
+    return output.slice(0, maxChars) +
+      "\n\n[Showing the first part of a long result — this is enough to proceed. Do NOT re-run the same command; take the next action.]";
   }
   return output;
 }
@@ -454,8 +474,53 @@ function trimContext(messages: any[]): void {
   }
 }
 
+// Ask LM Studio which models are CURRENTLY LOADED. If the configured model isn't
+// loaded but exactly one other model is, use that one — forcing a non-loaded model
+// ID makes LM Studio JIT-load a SECOND copy with its default (tiny) context window,
+// which then 400s on "n_keep > n_ctx". Honoring the already-loaded model avoids the
+// double-load and uses the context the user actually configured.
+async function resolveLoadedModel(configured: string): Promise<string> {
+  // LM Studio's OpenAI route (/v1/models) lists ALL INSTALLED models, so it can't
+  // tell us what's actually loaded. The native REST route (/api/v0/models) reports a
+  // per-model `state: "loaded" | "not-loaded"`. Use it to find the model that's
+  // already in memory and serving, and PREFER it — requesting a not-loaded model ID
+  // makes LM Studio JIT-load a second copy with its default (tiny) context window,
+  // which then 400s on "n_keep > n_ctx".
+  try {
+    const origin = BASE_URL.replace(/\/v\d+$/, "");      // strip the /v1 suffix
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 4000);
+    const res = await fetch(`${origin}/api/v0/models`, { signal: ctl.signal });
+    clearTimeout(t);
+    if (!res.ok) return configured;
+    const data: any = await res.json();
+    const list: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    const loadedChat = list
+      .filter((m) => m?.state === "loaded")
+      .map((m) => m.id)
+      .filter((id: string) => id && !/embed|embedding/i.test(id));
+    if (!loadedChat.length) return configured;            // nothing loaded — leave as-is
+    // Configured model IS loaded → use it.
+    if (configured && configured !== "local-model" && loadedChat.includes(configured)) return configured;
+    // Configured model is NOT loaded (or unset) → use the already-loaded one and say so.
+    const picked = loadedChat[0];
+    if (picked !== configured) {
+      process.stdout.write(
+        `\n\x1b[2m[local] Using the model already loaded in LM Studio: "${picked}"` +
+        (configured && configured !== "local-model" ? ` (your setting "${configured}" isn't loaded — not forcing a second copy).` : ".") +
+        `\x1b[0m\n`,
+      );
+    }
+    return picked;
+  } catch {
+    return configured; // server unreachable — let the normal error path handle it
+  }
+}
+
 async function main() {
-  const { workspace, coderModel, visionModel, chatId, steering, prompt } = parseCliArgs(process.argv.slice(2));
+  const parsed = parseCliArgs(process.argv.slice(2));
+  const { workspace, visionModel, chatId, steering, prompt } = parsed;
+  const coderModel = await resolveLoadedModel(parsed.coderModel);
   if (!prompt) {
     console.error('Usage: npm run edit:local -- "your request" [--workspace name] [--model id]');
     process.exit(1);
@@ -524,6 +589,13 @@ async function main() {
           .map((s: any) => `  ${s.id}: "${s.name}" (${s.clips} clips, ${s.duration_seconds}s)${s.id === latestSeq?.id ? "  ← most recent" : ""}`)
           .join("\n")
       }`;
+      // An unambiguous pointer the model can bind pronouns to. "it"/"that"/"again"
+      // → THIS sequence. This is what lets "export it again now" work after a
+      // Claude→local switch (or any new turn) without asking "which sequence?".
+      if (latestSeq) {
+        sequencesContext += `\nCURRENT TIMELINE = ${latestSeq.id} ("${latestSeq.name}", ${latestSeq.clips} clips, ${latestSeq.duration}s). ` +
+          `When the user says "it", "that", "the timeline", "the cut", or "again", they mean THIS sequence — act on it, never ask which one.`;
+      }
     }
   } catch { /* ok */ }
   try {
@@ -560,6 +632,18 @@ async function main() {
     `   Immediately execute the corresponding tool. If the user asks to "export the project" or\n` +
     `   "export it" and there is a sequence marked as "← most recent" in the sequences list,\n` +
     `   immediately run "sequence-export-premiere" with that sequence ID. Do NOT ask which sequence.\n` +
+    `9a. PRONOUNS & "AGAIN" ALWAYS MEAN THE MOST-RECENT SEQUENCE. When the user says "it", "that",\n` +
+    `   "this", "the timeline", "the sequence", "the cut", "the project", or "again" / "do it again" /\n` +
+    `   "export it again" / "now export it" — they mean the sequence marked "← most recent" above.\n` +
+    `   NEVER answer a pronoun request by asking "which sequence?" or listing options. Resolve the\n` +
+    `   pronoun to the most-recent sequence id and ACT immediately. "Export it again" = run\n` +
+    `   sequence-export-premiere on that id RIGHT NOW (a fresh .prproj overwrites/re-creates fine —\n` +
+    `   re-exporting is always allowed and never needs confirmation).\n` +
+    `9b. NEVER LOOP. Do not ask the user a question you can answer from the context above (the\n` +
+    `   SEQUENCES list, FOOTAGE, and MEMORY). Do not re-ask for something the user already told you\n` +
+    `   earlier in this conversation. If you have enough to act, act. Only ask the user when a\n` +
+    `   genuinely new creative decision is required that the context cannot answer — and never ask\n` +
+    `   the same thing twice.\n` +
     `\n` +
     `WORKFLOW for any edit:\n` +
     `  1. sources-list → get exact file paths\n` +
@@ -589,7 +673,26 @@ async function main() {
     `     Add ONE op: {"track":"A1","source":"audio/<the song>.mp3","position_seconds":0,\n` +
     `     "trim_start_seconds":0,"trim_end_seconds":<edit length>}. WITHOUT this the export\n` +
     `     has no sound. Do this once, near the end, covering the whole timeline.\n` +
-    `  8. sequence-export-premiere --sequence-id ID → deliver .prproj to Premiere\n` +
+    `  8. *** CATEGORY / SELECTS TIMELINES NEED LABELS *** — if the edit is organized by category\n` +
+    `     (a "selects" reel, "by category", grouped sections), you MUST add BOTH:\n` +
+    `       a) color labels on each clip — set "label_color" in each clips-add op\n` +
+    `          (red|orange|yellow|green|cyan|blue|violet|white), one color per category; AND\n` +
+    `       b) VISIBLE text labels via sequence-text-labels-add --sequence-id ID --track V2 --labels\n` +
+    `          '[{"text":"VENUE","color":"green","start_seconds":0,"end_seconds":24},{"text":"CROWD","color":"blue","start_seconds":24,"end_seconds":100}, ...]'\n` +
+    `          (one label per section, spanning that section's time range, same colors as the clips).\n` +
+    `     Also add sequence-markers-add for ruler navigation. Do NOT skip the text labels — a\n` +
+    `     categorized timeline without on-screen section titles is INCOMPLETE. This is required\n` +
+    `     EVERY time, even if the user didn't repeat it in a follow-up like "rebuild it".\n` +
+    `  8b. *** SAVE THE CATEGORIES *** — after building a categorized timeline, persist the structure:\n` +
+    `     sequence-categories-set --sequence-id ID --categories '[{"name":"Venue","color":"green",\n` +
+    `     "start_seconds":0,"end_seconds":24,"sources":["video/C207.mp4"]}, ...]'. Also set\n` +
+    `     "category" on each clips-add op. On ANY follow-up, FIRST run sequence-inspect: if it\n` +
+    `     returns "categories", reuse that structure — do NOT re-survey all the footage. Re-scanning\n` +
+    `     footage you already categorized wastes minutes.\n` +
+    `  9. sequence-export-premiere --sequence-id ID → deliver .prproj to Premiere.\n` +
+    `     Do NOT pass --output — the app pops a Save dialog so the USER picks where to save,\n` +
+    `     every export (including "export it again"). Only pass --output if the user gave a path.\n` +
+    `     If the result has cancelled:true, the user closed the dialog — just acknowledge it.\n` +
     `\n` +
     `SCALE TO FIT THE CANVAS (critical — wrong scale = tiny/cropped footage):\n` +
     `  Compute scale so the source FILLS the sequence frame. FILL = max(canvas_w/src_w, canvas_h/src_h).\n` +
@@ -607,16 +710,30 @@ async function main() {
       const raw = await fs.readFile(chatFile, "utf8");
       const chatData = JSON.parse(raw);
       const rawHistory = chatData.messages || [];
-      // Trim history from the end to fit a 5000 character budget. Local models
-      // get heavily confused by long, repetitive editing conversation history,
-      // so keeping it lean (last 1-2 turns) preserves their reasoning power.
+      // Local models get confused by long, repetitive editing history — but they
+      // ALSO need enough context that "export it again" resolves. Strategy:
+      //   1) Condense each message: keep the meaning, drop giant markdown tables /
+      //      walls of text that a Claude turn produces (they blow the budget and
+      //      confuse a small model). A condensed message keeps its first ~600 chars.
+      //   2) Always keep at least the LAST user+assistant exchange, even if long, so
+      //      the immediate referent ("it"/"that"/"again") is never lost.
+      const condense = (m: any): any => {
+        let t = (m.text || "").toString();
+        // Drop markdown table rows (| ... | ... |) — pure noise for the local model.
+        t = t.split("\n").filter((l: string) => !/^\s*\|.*\|\s*$/.test(l)).join("\n");
+        if (t.length > 600) t = t.slice(0, 600) + " …";
+        return { role: m.role, text: t.trim() };
+      };
+      const condensed = rawHistory.map(condense).filter((m: any) => m.text);
       let totalLength = 0;
-      const budget = 5000;
+      const budget = 6000;
       const kept: any[] = [];
-      for (let i = rawHistory.length - 1; i >= 0; i--) {
-        const len = rawHistory[i].text?.length || 0;
-        if (totalLength + len > budget) break;
-        kept.unshift(rawHistory[i]);
+      for (let i = condensed.length - 1; i >= 0; i--) {
+        const len = condensed[i].text?.length || 0;
+        // Always keep the final two messages (last exchange) regardless of budget.
+        const isLastExchange = i >= condensed.length - 2;
+        if (!isLastExchange && totalLength + len > budget) break;
+        kept.unshift(condensed[i]);
         totalLength += len;
       }
       chatHistory = kept;
@@ -676,6 +793,11 @@ async function main() {
   const MAX_STEPS = 80;
   const RUN_DEADLINE = Date.now() + 1800000; // 30-min absolute ceiling for the whole run
   let toolCallsEver = 0;
+  // LOOP GUARD: small local models can get stuck calling the SAME command over and
+  // over (e.g. re-running sequence-inspect because the output "looks truncated").
+  // Track how many times each (command+args) signature has run; escalate from a
+  // nudge to a hard stop so we never spin for 80 steps doing nothing.
+  const callCounts = new Map<string, number>();
   for (let step = 0; step < MAX_STEPS; step++) {
     // Absolute wall-clock guard: even if each individual call succeeds, a long
     // chain of slow steps must still terminate. Never hang the user.
@@ -840,6 +962,32 @@ async function main() {
         continue;
       }
 
+      // LOOP GUARD: detect the same command+args repeating and break the cycle.
+      const sig = `${cmd} ${args.join(" ")}`;
+      const seen = (callCounts.get(sig) || 0) + 1;
+      callCounts.set(sig, seen);
+      if (seen >= 3) {
+        // The model is stuck repeating this exact call. Don't run it again — tell the
+        // model plainly that the result won't change and it must either ACT on what it
+        // already has or finish. After a couple of these, bail with saved state.
+        const note =
+          `[LOOP DETECTED] You have already run "${cmd}" with these exact arguments ${seen} times — ` +
+          `the result will NOT change by repeating it. The data you already received is complete ` +
+          `(it is not truncated). STOP re-inspecting. Use what you have: take the NEXT concrete ` +
+          `action toward the task (add clips, add labels, set categories, or export), or if the ` +
+          `task is done, give a final summary. Do NOT call "${cmd}" again.`;
+        process.stdout.write(`\x1b[33m· loop guard: "${cmd}" repeated ${seen}×; nudging the model to move on\x1b[0m\n`);
+        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: false, error: note }) });
+        if (seen >= 5) {
+          process.stdout.write(
+            `\n\x1b[33m⚠ The local model got stuck repeating "${cmd}" and couldn't move on. ` +
+            `Your work so far is saved. Try a stronger model in LM Studio, or rephrase the request ` +
+            `into a single concrete step (e.g. "add V2 text labels for these sections: …").\x1b[0m\n`,
+          );
+          return;
+        }
+        continue;
+      }
       process.stdout.write(`\x1b[2m· jc ${cmd} ${args.join(" ")}\x1b[0m\n`);
       const out = await runJc(cmd, args, workspace);
       let cleanedOut = cleanAndTruncateToolOutput(cmd, out);

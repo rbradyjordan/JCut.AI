@@ -185,8 +185,10 @@ function AISection({ settings, onChange }: { settings: AppSettings; onChange: (p
           <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-dim">Execution Mode</div>
           <div className="grid grid-cols-2 gap-3">
             {([
-              { id: "claude" as const, title: "Claude", sub: "Your Max subscription" },
-              { id: "single" as const, title: "Single Local", sub: "One LM Studio model" },
+              { id: "claude" as const, title: "Claude",
+                sub: settings.claudeAccount ? `${settings.claudeAccount} · ${settings.claudeModel}` : `Your subscription · ${settings.claudeModel}` },
+              { id: "single" as const, title: "Single Local",
+                sub: settings.lmStudioCoderModel ? settings.lmStudioCoderModel : "No model loaded" },
             ]).map((o) => {
               const active =
                 !settings.hybridMode &&
@@ -242,6 +244,9 @@ function AISection({ settings, onChange }: { settings: AppSettings; onChange: (p
                     <div className={`mt-1 text-xs ${settings.hybridMode ? "text-white/80" : "text-dim"}`}>
                       Claude directs the cut while local models do the heavy lifting.
                     </div>
+                    <div className={`mt-1.5 truncate text-[11px] ${settings.hybridMode ? "text-white/70" : "text-dim/80"}`}>
+                      {settings.claudeModel} + {settings.lmStudioCoderModel || "no local model"}
+                    </div>
                   </motion.button>
                   <motion.button
                     whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
@@ -254,6 +259,9 @@ function AISection({ settings, onChange }: { settings: AppSettings; onChange: (p
                     <div className={`mt-1 text-xs ${settings.backend === "local" && settings.localMode === "dual" && !settings.hybridMode ? "text-white/80" : "text-dim"}`}>
                       Separate coder and vision models in LM Studio.
                     </div>
+                    <div className={`mt-1.5 truncate text-[11px] ${settings.backend === "local" && settings.localMode === "dual" && !settings.hybridMode ? "text-white/70" : "text-dim/80"}`}>
+                      {settings.lmStudioCoderModel || "no logic model"} · {settings.lmStudioVisionModel || "no vision model"}
+                    </div>
                   </motion.button>
                 </div>
               </motion.div>
@@ -262,7 +270,26 @@ function AISection({ settings, onChange }: { settings: AppSettings; onChange: (p
         </div>
       </div>
 
-      {settings.backend === "claude" ? (
+      {/* Show the panels for whatever the active mode actually USES.
+          - Claude         → Claude only
+          - Single/Dual    → LM Studio only
+          - Hybrid         → BOTH (Claude directs, local executes) */}
+      {settings.hybridMode ? (
+        <div className="space-y-4">
+          <div className="rounded-lg bg-accent/5 px-3 py-2 text-[12px] text-dim ring-1 ring-accent/15">
+            <span className="font-medium text-ink">Hybrid uses both engines.</span> Claude plans the
+            edit; your local models do the token-heavy execution. Configure each below.
+          </div>
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-dim">Creative Director — Claude</div>
+            <ClaudePanel model={settings.claudeModel} onModel={(m) => onChange({ claudeModel: m })} />
+          </div>
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-dim">Local Execution — LM Studio</div>
+            <LMStudioPanel settings={settings} onChange={onChange} />
+          </div>
+        </div>
+      ) : settings.backend === "claude" ? (
         <ClaudePanel model={settings.claudeModel} onModel={(m) => onChange({ claudeModel: m })} />
       ) : (
         <LMStudioPanel settings={settings} onChange={onChange} />
@@ -271,7 +298,7 @@ function AISection({ settings, onChange }: { settings: AppSettings; onChange: (p
   );
 }
 
-function ClaudePanel({ model, onModel }: { model: "opus" | "sonnet"; onModel: (m: "opus" | "sonnet") => void }) {
+function ClaudePanel({ model, onModel }: { model: "opus" | "sonnet" | "haiku"; onModel: (m: "opus" | "sonnet" | "haiku") => void }) {
   const [status, setStatus] = useState<{ available: boolean; version?: string; note: string } | null>(null);
   const [checking, setChecking] = useState(true);
   const [usage, setUsage] = useState<{ utilization: number; resetsAt?: string } | null>(null);
@@ -330,10 +357,11 @@ function ClaudePanel({ model, onModel }: { model: "opus" | "sonnet"; onModel: (m
 
       <div>
         <div className="mb-1.5 text-xs text-dim">Model</div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-3 gap-2">
           {([
             { id: "opus" as const, name: "Opus", sub: "Most capable" },
-            { id: "sonnet" as const, name: "Sonnet", sub: "Faster" },
+            { id: "sonnet" as const, name: "Sonnet", sub: "Balanced" },
+            { id: "haiku" as const, name: "Haiku", sub: "Fastest" },
           ]).map((m) => {
             const active = model === m.id;
             return (

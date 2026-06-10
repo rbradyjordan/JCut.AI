@@ -212,11 +212,14 @@ async function main() {
         }
       } else if (message.type === "rate_limit_event") {
         const info = message.rate_limit_info;
-        if (info && info.utilization !== undefined) {
+        // Emit whenever we have ANY rate-limit info — utilization may be absent on
+        // some events but status/resetsAt still let the UI show a meaningful bar.
+        if (info) {
           process.stdout.write(`__CLAUDE_USAGE_INFO__:${JSON.stringify({
-            utilization: info.utilization,
+            utilization: typeof info.utilization === "number" ? info.utilization : 0,
             resetsAt: info.resetsAt,
             type: info.rateLimitType,
+            status: info.status,
           })}\n`);
         }
       } else if (message.type === "result") {

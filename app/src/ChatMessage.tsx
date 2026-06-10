@@ -144,7 +144,7 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
     const k = `${keyBase}-${i++}`;
     if (tok.startsWith("**")) nodes.push(<strong key={k}>{tok.slice(2, -2)}</strong>);
     else if (tok.startsWith("`")) nodes.push(
-      <code key={k} className="rounded bg-surface2 px-1.5 py-0.5 text-[12px] text-accent">{tok.slice(1, -1)}</code>);
+      <code key={k} className="rounded bg-surface2 px-1.5 py-0.5 text-[12px] text-accent break-all">{tok.slice(1, -1)}</code>);
     else nodes.push(<em key={k}>{tok.slice(1, -1)}</em>);
     last = match.index + tok.length;
   }
@@ -224,7 +224,7 @@ export default function ChatMessage({ role, text, live, showReasoning, onCopy, o
       className={`group flex flex-col ${isUser ? "items-end" : "items-start"}`}
     >
       <div
-        className={`max-w-[80%] space-y-2 rounded-xl2 px-4 py-3 text-[14px] leading-relaxed shadow-card ${
+        className={`max-w-[80%] min-w-0 space-y-2 rounded-xl2 px-4 py-3 text-[14px] leading-relaxed shadow-card [overflow-wrap:anywhere] ${
           isUser ? "text-white" : "bg-surface text-ink shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]"
         }`}
         style={isUser ? { background: TEAL_GRADIENT } : undefined}

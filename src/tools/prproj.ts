@@ -277,7 +277,7 @@ import { promises as fsp, existsSync } from "node:fs";
 import zlibFull from "node:zlib";
 import path from "node:path";
 import crypto from "node:crypto";
-import { PROJECT_PREFIX, SEQ_MASTERCLIP_UID, AUDIO_MIXER, AUDIO_MIXER_OBJECT_ID, CLIP_TEMPLATE, MARKERS_TEMPLATE } from "./prproj-scaffold.js";
+import { PROJECT_PREFIX, SEQ_MASTERCLIP_UID, AUDIO_MIXER, AUDIO_MIXER_OBJECT_ID, CLIP_TEMPLATE, MARKERS_TEMPLATE, MARKER_ENTRY_TEMPLATE, MARKER_DETAIL_TEMPLATE, MARKER_COLOR_INDEX, CLIP_LABEL } from "./prproj-scaffold.js";
 
 function secToTicks(s: number): bigint {
   return BigInt(Math.round(s * TICKS_PER_SECOND));
@@ -289,6 +289,37 @@ function modStateBody(uuid: string): string {
 }
 function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// A string that will sit inside a JSON literal which itself sits inside an XML
+// attribute (the DVAMarker payload). Escape for JSON (backslash, quote, control
+// chars) FIRST, then for XML. Order matters: JSON's added backslashes must not be
+// re-escaped as XML, and XML's &quot; must come from the JSON quote, not before it.
+function jsonXmlEsc(s: string): string {
+  const jsonSafe = s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/[\n\r\t]/g, " ");
+  return xmlEscape(jsonSafe);
+}
+
+// Map a JCut label color name to the VideoClip's Premiere label fields:
+//   asl.clip.label.color → a 24-bit RGB integer
+//   asl.clip.label.name  → "BE.Prefs.LabelColors.<index>" (Premiere's preset slot)
+// Falls back to a neutral default when no color is set, so the template's
+// placeholders are always filled (an unreplaced placeholder = "damaged" file).
+function labelSubs(color?: string): { __LABEL_COLOR_RGB__: string; __LABEL_COLOR_NAME__: string } {
+  const meta = color ? CLIP_LABEL[color] : undefined;
+  const idx = color ? (MARKER_COLOR_INDEX[color] ?? 1) : 1;
+  let rgbInt = 6769408; // Premiere's default iris/violet, matches the reference files
+  if (meta) {
+    const [r, g, b] = meta.color.split(",").map((n) => parseInt(n, 10) || 0);
+    rgbInt = (r << 16) | (g << 8) | b;
+  }
+  return {
+    __LABEL_COLOR_RGB__: String(rgbInt),
+    __LABEL_COLOR_NAME__: `BE.Prefs.LabelColors.${idx}`,
+  };
 }
 
 // Globally-unique deterministic UID: seeded with export-time random salt + item
@@ -460,6 +491,15 @@ export function buildPrprojXml(
   const a1Uid = audioTracks.length ? audioTrackUid.get(audioTracks[0])! : nextUid();
   const ensureAudioTracks = audioTracks.length ? audioTracks : ["A1"];
   if (!audioTracks.length) audioTrackUid.set("A1", a1Uid);
+  // We currently export a single audio track (A1). If the sequence used additional
+  // audio tracks, tell the user those clips weren't laid onto separate tracks in the
+  // .prproj (so the file still opens cleanly instead of being rejected as damaged).
+  if (audioTracks.length > 1) {
+    warnings.push(
+      `Audio on ${audioTracks.slice(1).join(", ")} wasn't exported as separate track(s) — ` +
+      `only A1 is written in this format. Re-add extra audio layers in Premiere if needed.`,
+    );
+  }
 
   // Singleton sequence UID. The scaffold's bin entry (ClipProjectItem) already
   // points at the sequence MasterClip via the fixed SEQ_MASTERCLIP_UID — our
@@ -546,10 +586,13 @@ export function buildPrprojXml(
       __CONTENT_STATE__: contentState,
       __MOD_HASH__: modHash,
       __MOD_BODY__: modStateBody(modUuid),
+      ...labelSubs(c.label_color),
     };
 
-    // Stamp the clip template + its Markers object.
-    let clipXml = CLIP_TEMPLATE + MARKERS_TEMPLATE.replace(/__MARKERS_ID__/g, ids.__MARKERS_ID__);
+    // Stamp the clip template + its (empty) per-clip Markers object.
+    let clipXml = CLIP_TEMPLATE + MARKERS_TEMPLATE
+      .replace(/__MARKERS_ID__/g, ids.__MARKERS_ID__)
+      .replace(/__MARKER_ENTRIES__/g, "");
     for (const [ph, val] of Object.entries(subs)) {
       clipXml = clipXml.split(ph).join(val);
     }
@@ -582,6 +625,33 @@ export function buildPrprojXml(
   // ─────────────────────────────────────────────────────────────────────────────
   const totalDur = secToTicks(Math.max(0, sequenceDuration(seq)));
   const seqMarkersId = nextId();
+
+  // ── Sequence markers (timeline ruler) ──────────────────────────────────────
+  // Each JCut marker becomes a Premiere DVAMarker: an entry inside the sequence's
+  // Markers container that points to a per-marker detail object carrying the name
+  // (the visible text label), start time, duration, and color index. These are the
+  // colored text labels the user sees on the timeline ruler in Premiere.
+  let markerEntries = "";
+  let markerDetails = "";
+  (seq.markers || []).forEach((mk, i) => {
+    const guid = nextUid();
+    const detailId = nextId();
+    const colorIdx = MARKER_COLOR_INDEX[mk.color || "green"] ?? 0;
+    markerEntries += MARKER_ENTRY_TEMPLATE
+      .replace(/__INDEX__/g, String(i))
+      .replace(/__GUID__/g, guid)
+      .replace(/__DETAIL_ID__/g, String(detailId));
+    markerDetails += MARKER_DETAIL_TEMPLATE
+      .replace(/__DETAIL_ID__/g, String(detailId))
+      .replace(/__GUID__/g, guid)
+      .replace(/__TICKS__/g, String(secToTicks(Math.max(0, mk.time_seconds))))
+      .replace(/__DURATION_TICKS__/g, String(secToTicks(Math.max(0, mk.duration_seconds || 0))))
+      // The label text lives inside a JSON string inside an XML attribute — escape
+      // for JSON first (quotes/backslashes), then for XML (&, <, >).
+      .replace(/__NAME__/g, jsonXmlEsc(mk.label || ""))
+      .replace(/__COLOR_INDEX__/g, String(colorIdx));
+  });
+
   parts.push(
     `\t<Sequence ObjectUID="${seqUid}" ClassID="6a15d903-8739-11d5-af2d-9b7855ad8974" Version="11">\n` +
     `\t\t<Node Version="1">\n\t\t\t<Properties Version="1">\n` +
@@ -609,8 +679,12 @@ export function buildPrprojXml(
     `\t\t<Name>${esc(seq.name || "JCut Sequence")}</Name>\n` +
     `\t\t<PreviewFormatIdentifier>fc3cd4d9-d839-8259-9276-05c5000000ea</PreviewFormatIdentifier>\n` +
     `\t</Sequence>\n` +
-    // The sequence's own Markers object (empty).
-    MARKERS_TEMPLATE.replace(/__MARKERS_ID__/g, String(seqMarkersId)),
+    // The sequence's own Markers object — populated with the marker entries.
+    MARKERS_TEMPLATE
+      .replace(/__MARKERS_ID__/g, String(seqMarkersId))
+      .replace(/__MARKER_ENTRIES__/g, markerEntries) +
+    // The per-marker detail objects (top-level siblings, referenced by the entries).
+    markerDetails,
   );
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -678,15 +752,19 @@ export function buildPrprojXml(
     `\t</VideoTrackGroup>\n`,
   );
 
-  // Always wire at least the guaranteed A1 track (the static mixer expects one).
-  const aTrackList = ensureAudioTracks
-    .map((t, i) => `\t\t\t\t<Track Index="${i}" ObjectURef="${audioTrackUid.get(t)}"/>\n`).join("");
+  // CRITICAL: only ONE AudioClipTrack object actually exists in this file — the A1
+  // track defined by the AUDIO_MIXER scaffold (a1Uid). We must reference EXACTLY
+  // that one track here. Emitting a <Track> for A2/A3 (because the agent placed
+  // audio there) would point at a UID that is never defined → Premiere rejects the
+  // project as "damaged". Until we emit real per-track AudioClipTrack objects, all
+  // audio is folded onto A1, so the group lists a single track.
+  const aTrackList = `\t\t\t\t<Track Index="0" ObjectURef="${a1Uid}"/>\n`;
   parts.push(
     `\t<AudioTrackGroup ObjectID="${audioTGId}" ClassID="9b9238b9-53a8-4cc3-b03f-b36246d052e6" Version="6">\n` +
     `\t\t<TrackGroup Version="1">\n` +
     `\t\t\t<Tracks Version="1">\n${aTrackList}\t\t\t</Tracks>\n` +
     `\t\t\t<FrameRate>5760000</FrameRate>\n` +
-    `\t\t\t<NextTrackID>${ensureAudioTracks.length + 1}</NextTrackID>\n` +
+    `\t\t\t<NextTrackID>2</NextTrackID>\n` +
     `\t\t</TrackGroup>\n` +
     `\t\t<MasterTrack ObjectRef="${audioMixId}"/>\n` +
     `\t\t<ID>${nextUid()}</ID>\n` +
@@ -769,9 +847,7 @@ export function buildPrprojXml(
   if (seq.transitions?.length) {
     warnings.push(`${seq.transitions.length} transition(s) not exported — re-apply them in Premiere.`);
   }
-  if (seq.markers?.length) {
-    warnings.push(`${seq.markers.length} marker(s) not exported in this format yet.`);
-  }
+  // Markers ARE now exported (colored text labels on the timeline ruler) — no warning.
 
   const xml =
     `<?xml version="1.0" encoding="UTF-8" ?>\n` +

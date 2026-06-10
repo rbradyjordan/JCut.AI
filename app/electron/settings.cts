@@ -26,8 +26,8 @@ export interface AppSettings {
   hybridMode: boolean;
   // Active editing mode/preset id (e.g. "recap", or a user preset id). null = freeform.
   mode: string | null;
-  // Claude model: "opus" (most capable) | "sonnet" (faster). Default opus.
-  claudeModel: "opus" | "sonnet";
+  // Claude model: "opus" (most capable) | "sonnet" (balanced) | "haiku" (fastest). Default opus.
+  claudeModel: "opus" | "sonnet" | "haiku";
   // Skill defaults used by the quick-action chips.
   skillStyleName: string;
   skillImportName: string;

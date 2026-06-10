@@ -17,8 +17,8 @@ contextBridge.exposeInMainWorld("jcut", {
   lmStudioTest: (url) => ipcRenderer.invoke("lmstudio-test", url),
 
   // agent run + steer/interrupt
-  runAgent: (prompt, chatId, steering) => ipcRenderer.invoke("agent-run", prompt, chatId, steering),
-  stopAgent: () => ipcRenderer.invoke("agent-stop"),
+  runAgent: (prompt, chatId, steering, runId) => ipcRenderer.invoke("agent-run", prompt, chatId, steering, runId),
+  stopAgent: (runId) => ipcRenderer.invoke("agent-stop", runId),
   onAgentChunk: (cb) => {
     const h = (_e, chunk) => cb(chunk);
     ipcRenderer.on("agent-chunk", h);

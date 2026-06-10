@@ -25,6 +25,7 @@ import { exportPrproj } from "./prproj.js";
 import { analyzeMusic } from "./beats.js";
 import { analyzeVideo } from "./video-analysis.js";
 import { extractFrames, saveContent, loadContent, ClipContent } from "./content.js";
+import { renderLabelPng } from "./labels.js";
 import { BUILTIN_MODES, loadPresets, savePreset, deletePreset, resolveInstructions } from "./presets.js";
 import { loadCriteria, saveCriteria, summarizeCriteria, Criteria, Toggle } from "./criteria.js";
 import {
@@ -32,11 +33,64 @@ import {
 } from "./transcript.js";
 import {
   Sequence, SequenceMarker, MarkerColor, sequenceDuration, Orientation, orientationCanvas, orientationOf,
-  fillTransform, isVideoTrack,
+  fillTransform, isVideoTrack, clipTimelineEnd,
 } from "./model.js";
 import { promises as fs } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { workspaceDir } from "./store.js";
+
+// Ask the user WHERE to save an export, every time. Three strategies, in order:
+//   1. Electron host (JCUT_IPC_DIR set): emit a marker the host watches in our
+//      stdout; the host shows a NATIVE Save dialog and writes the chosen path to a
+//      response file we poll. Returns the path, or "__CANCELLED__".
+//   2. macOS osascript "choose file name" (when run from a terminal/standalone).
+//   3. undefined → caller uses a default folder.
+async function requestSavePath(defaultName: string): Promise<string | undefined> {
+  const ipcDir = process.env.JCUT_IPC_DIR;
+  if (ipcDir) {
+    // File-based IPC: this CLI runs INSIDE the agent (Bash tool / execFile), so our
+    // stdout is captured by the agent, NOT piped to the Electron host. So we put the
+    // request in a FILE the host watches (fs.watch on JCUT_IPC_DIR), and poll for the
+    // host's response file. The host shows the native Save dialog.
+    const token = `${process.pid}-${Date.now()}`;
+    const reqFile = path.join(ipcDir, `save-request-${token}.json`);
+    const respFile = path.join(ipcDir, `save-response-${token}.txt`);
+    try {
+      await fs.writeFile(reqFile, JSON.stringify({ token, defaultName, respFile }));
+    } catch {
+      return undefined; // can't write the request — fall back to default
+    }
+    // Poll for the host's response (chosen path, or "__CANCELLED__").
+    const deadline = Date.now() + 180000; // 3-min ceiling so we never hang forever
+    while (Date.now() < deadline) {
+      if (existsSync(respFile)) {
+        try {
+          const val = readFileSync(respFile, "utf8").trim();
+          try { unlinkSync(respFile); } catch { /* best effort */ }
+          try { unlinkSync(reqFile); } catch { /* best effort */ }
+          if (!val || val === "__CANCELLED__") return "__CANCELLED__";
+          return val;
+        } catch { /* not fully written yet — keep polling */ }
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    try { unlinkSync(reqFile); } catch { /* */ }
+    return undefined; // timed out — fall through to default
+  }
+  // Standalone / terminal: native macOS dialog via AppleScript.
+  if (process.platform === "darwin") {
+    try {
+      const { execSync } = await import("node:child_process");
+      const safe = defaultName.replace(/"/g, '\\"');
+      const cmd = `osascript -e 'POSIX path of (choose file name with prompt "Save Premiere Pro project:" default name "${safe}")'`;
+      const chosen = execSync(cmd, { encoding: "utf8" }).trim();
+      if (chosen) return chosen;
+      return "__CANCELLED__";
+    } catch { /* user cancelled or no GUI — default below */ }
+  }
+  return undefined;
+}
 
 // Tiny flag parser: --key value, repeated --files collects into an array,
 // bare flags become true.
@@ -247,7 +301,7 @@ async function main() {
           emit({ ok: true, sequence: seq, duration_seconds: Number(sequenceDuration(seq).toFixed(3)) });
           break;
         }
-        const clips = [...seq.clips]
+        const allClips = [...seq.clips]
           .sort((x, y) => x.track.localeCompare(y.track) || x.start_time_seconds - y.start_time_seconds)
           .map((c) => {
             const dur = (c.trim_end_seconds - c.trim_start_seconds) / (c.speed || 1);
@@ -256,14 +310,65 @@ async function main() {
             return `${c.id} ${c.track} @${c.start_time_seconds}s +${dur.toFixed(2)}s ` +
                    `${src}[${c.trim_start_seconds}-${c.trim_end_seconds}] ${sc}`.trim();
           });
+        // Per-track summary (count + span) so a model understands the shape WITHOUT
+        // reading every clip line — critical for small local models that choke on a
+        // 100+ line dump and loop "the output is truncated".
+        const trackSummary: Record<string, { clips: number; from: number; to: number }> = {};
+        for (const c of seq.clips) {
+          const t = trackSummary[c.track] || { clips: 0, from: Infinity, to: 0 };
+          t.clips++; t.from = Math.min(t.from, c.start_time_seconds);
+          t.to = Math.max(t.to, clipTimelineEnd(c));
+          trackSummary[c.track] = t;
+        }
+        const tracks = Object.entries(trackSummary)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([t, s]) => `${t}: ${s.clips} clips, ${s.from.toFixed(1)}–${s.to.toFixed(1)}s`);
+
+        // HARD CAP the per-clip list. A local model's context is small; dumping 100+
+        // clip lines overflows it and it never sees the categories/markers below.
+        // --summary (or a large sequence) returns the structure WITHOUT every clip.
+        const CLIP_CAP = a.summary ? 0 : 60;
+        const clips = allClips.length > CLIP_CAP ? allClips.slice(0, CLIP_CAP) : allClips;
+        const clipsTruncated = allClips.length > clips.length;
+
         emit({
           ok: true,
           name: seq.name,
           settings: `${seq.settings.width}x${seq.settings.height}@${seq.settings.framerate}`,
           duration_seconds: Number(sequenceDuration(seq).toFixed(3)),
           clip_count: seq.clips.length,
-          clips, // array of compact strings
+          tracks, // compact per-track summary (always small)
+          // Persisted categorization — read this back on follow-ups INSTEAD of
+          // re-surveying the footage. If present, the structure is already decided.
+          ...(seq.categories?.length ? { categories: seq.categories } : {}),
+          ...(seq.markers?.length ? { markers: seq.markers.map((m) => `${m.time_seconds}s ${m.color} "${m.label}"`) } : {}),
+          ...(clips.length ? { clips } : {}), // omitted entirely in --summary mode
+          ...(clipsTruncated ? { clips_truncated: `showing ${clips.length} of ${allClips.length} clips — use the categories/markers/tracks above for structure; pass --summary for structure-only, or --full for everything.` } : {}),
         });
+        break;
+      }
+
+      case "sequence-categories-set": {
+        // Persist the categorization structure on the sequence so follow-up edits
+        // ("include more", "rebuild") reuse it instead of re-scanning all the footage.
+        //   --workspace W --sequence-id ID
+        //   --categories '[{"name":"Venue","color":"green","start_seconds":0,"end_seconds":24,"sources":["video/C207.mp4"]}, ...]'
+        const ws = a.workspace || fail("--workspace required");
+        const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        const cats = (() => {
+          try { return JSON.parse(a.categories || "[]"); } catch { return fail("--categories must be valid JSON"); }
+        })();
+        if (!Array.isArray(cats) || !cats.length) fail("--categories must be a non-empty JSON array");
+        seq.categories = cats.map((c: any) => ({
+          name: String(c.name || "").trim() || "Section",
+          color: typeof c.color === "string" ? c.color : undefined,
+          start_seconds: typeof c.start_seconds === "number" ? c.start_seconds : undefined,
+          end_seconds: typeof c.end_seconds === "number" ? c.end_seconds : undefined,
+          sources: Array.isArray(c.sources) ? c.sources.filter((s: any) => typeof s === "string") : undefined,
+          note: typeof c.note === "string" ? c.note : undefined,
+        }));
+        await saveSequence(ws, seq);
+        emit({ ok: true, categories: seq.categories });
         break;
       }
 
@@ -313,7 +418,21 @@ async function main() {
         async function worker() {
           while (idx < unique.length) {
             const f = unique[idx++];
-            try { byFile.set(f, { file: f, ...(await probeMedia(f)) }); }
+            try {
+              const p = await probeMedia(f);
+              // Explicit orientation + a sideways flag so the agent reasons about
+              // rotated footage. width/height from probeMedia are already in display
+              // orientation (rotation applied), so this reflects how it will appear.
+              const orient = p.width && p.height
+                ? (p.width > p.height ? "horizontal" : p.height > p.width ? "vertical" : "square")
+                : undefined;
+              byFile.set(f, {
+                file: f,
+                ...p,
+                orientation: orient,
+                ...(p.rotation ? { sideways: true, note: `Source has a ${p.rotation}° rotation flag; display dims ${p.width}x${p.height} already account for it.` } : {}),
+              });
+            }
             catch (e) { byFile.set(f, { file: f, error: (e as Error).message }); }
           }
         }
@@ -442,6 +561,58 @@ async function main() {
         seq.markers = [...(seq.markers || []), ...valid];
         await saveSequence(ws, seq);
         emit({ ok: true, added: valid.length, markers: seq.markers });
+        break;
+      }
+
+      case "sequence-text-labels-add": {
+        // Add VISIBLE on-timeline text labels: renders each section title to a PNG
+        // and places it as an image clip on a track above the footage (default V2),
+        // so the text shows directly on the timeline (unlike ruler markers, which
+        // are just chevrons). Pair with sequence-markers-add for ruler navigation.
+        //
+        //   --workspace W --sequence-id ID --track V2
+        //   --labels '[{"text":"OPENING — Venue","color":"green","start_seconds":0,"end_seconds":9}, ...]'
+        //
+        // Each label spans [start_seconds, end_seconds) on the chosen track. color
+        // matches the marker palette. The image fills the canvas with a colored pill
+        // holding the text in the lower-left corner.
+        const ws = a.workspace || fail("--workspace required");
+        const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        const track = (a.track as string) || "V2";
+        const labels: any[] = (() => {
+          try { return JSON.parse(a.labels || "[]"); } catch { return fail("--labels must be valid JSON"); }
+        })();
+        if (!labels.length) fail("--labels must contain at least one label");
+        const W = seq.settings.width, H = seq.settings.height;
+        const ops: any[] = [];
+        for (let i = 0; i < labels.length; i++) {
+          const L = labels[i];
+          const text = (L.text ?? L.label)?.toString().trim();
+          if (!text) fail(`label[${i}]: text required`);
+          const start = Number(L.start_seconds ?? L.start ?? L.time_seconds ?? 0);
+          const end = Number(L.end_seconds ?? L.end ?? (start + 3));
+          if (!(end > start)) fail(`label[${i}]: end_seconds must be > start_seconds`);
+          const png = await renderLabelPng(ws, { text, color: L.color, width: W, height: H });
+          // Image clip: trim 0..(end-start), positioned at start, on the overlay track.
+          ops.push({
+            track,
+            source: png,
+            position_seconds: start,
+            trim_start_seconds: 0,
+            trim_end_seconds: end - start,
+            video_only: true,
+            label_color: L.color,
+          });
+        }
+        const { created, warnings } = await addClips(ws, seq, ops, true);
+        await saveSequence(ws, seq);
+        emit({
+          ok: true,
+          added: created.length,
+          track,
+          labels: created.map((c) => `${c.id} ${c.track} @${c.start_time_seconds}s`),
+          warnings,
+        });
         break;
       }
 
@@ -1166,17 +1337,21 @@ async function main() {
         const seq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
 
         let out = a.output;
-        if (!out && process.platform === "darwin") {
-          try {
-            const { execSync } = await import("node:child_process");
-            const defaultName = `${(seq.name || seq.id).replace(/[^\w.-]/g, "_")}.prproj`;
-            const cmd = `osascript -e 'POSIX path of (choose file name with prompt "Save Premiere Pro project:" default name "${defaultName}")'`;
-            const chosen = execSync(cmd, { encoding: "utf8" }).trim();
-            if (chosen) out = chosen;
-          } catch { /* user cancelled or AppleScript failed — use default below */ }
+        const defaultName = `${(seq.name || seq.id).replace(/[^\w.-]/g, "_")}.prproj`;
+        // No explicit --output: ask the user WHERE to save, every time. When running
+        // inside the Electron app (JCUT_IPC_DIR is set), request a NATIVE Save dialog
+        // via the host (it watches our stdout for the marker and writes the chosen
+        // path to a response file). Fall back to osascript, then a default folder.
+        if (!out) {
+          const picked = await requestSavePath(defaultName);
+          if (picked === "__CANCELLED__") {
+            emit({ ok: false, cancelled: true, note: "Export cancelled — no location chosen." });
+            break;
+          }
+          if (picked) out = picked;
         }
         if (!out) {
-          out = path.join(workspaceDir(ws), "renders", `${(seq.name || seq.id).replace(/[^\w.-]/g, "_")}.prproj`);
+          out = path.join(workspaceDir(ws), "renders", defaultName);
         }
         const res = await exportPrproj(seq, out, workspaceDir(ws));
         emit({

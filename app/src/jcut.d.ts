@@ -17,7 +17,7 @@ export interface AppSettings {
   lmStudioVisionModel: string | null;
   hybridMode: boolean;
   mode: string | null;
-  claudeModel: "opus" | "sonnet";
+  claudeModel: "opus" | "sonnet" | "haiku";
   skillStyleName: string;
   skillImportName: string;
   skillAnalysisName: string;
@@ -41,8 +41,8 @@ declare global {
     claudeStatus(): Promise<{ ok: boolean; available: boolean; version?: string; bin?: string; note: string }>;
     claudeLoginHelp(): Promise<{ ok: boolean }>;
     lmStudioTest(url: string): Promise<{ ok: boolean; models?: string[]; error?: string; normalizedUrl?: string }>;
-    runAgent(prompt: string, chatId?: string, steering?: boolean): Promise<{ ok: boolean }>;
-    stopAgent(): Promise<{ ok: boolean; stopped: boolean }>;
+    runAgent(prompt: string, chatId?: string, steering?: boolean, runId?: string): Promise<{ ok: boolean }>;
+    stopAgent(runId?: string): Promise<{ ok: boolean; stopped: boolean }>;
     onAgentChunk(cb: (chunk: string) => void): () => void;
     onUsageUpdate(cb: (info: any) => void): () => void;
     onAgentDone(cb: (code: string) => void): () => void;

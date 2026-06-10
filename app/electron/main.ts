@@ -3,6 +3,8 @@
 // backend-aware agent runs, and interrupt/kill for steering conversations.
 import { app, BrowserWindow, ipcMain, nativeTheme, shell, Menu, dialog } from "electron";
 import path from "node:path";
+import os from "node:os";
+import fsSync from "node:fs";
 import { spawn, execFile, ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { loadSettings, saveSettings, AppSettings } from "./settings.cjs";
@@ -347,7 +349,7 @@ ipcMain.handle("lmstudio-test", async (_e, url: string) => {
 });
 
 // ── Agent run (backend-aware) with streaming + interrupt ─────────────────────
-ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?: boolean) => {
+ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?: boolean, runId?: string) => {
   const s = loadSettings();
   const useLocal = s.backend === "local";
   // If an editing mode/preset is active, fetch its instructions and prepend them
@@ -364,7 +366,12 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
   }
   const fullPrompt = modePrefix + prompt;
   const entry = useLocal ? AGENT_LOCAL : AGENT;
-  const extraEnv: Record<string, string> = { FORCE_COLOR: "0" };
+  // A per-run scratch dir the agent (and its `jc` CLI grandchild) use to ask the
+  // host for things that need the GUI — e.g. a native Save dialog on export. The
+  // CLI writes a request marker to stdout and polls a response file here.
+  const ipcDir = path.join(os.tmpdir(), "jcut-ipc");
+  try { fsSync.mkdirSync(ipcDir, { recursive: true }); } catch { /* exists */ }
+  const extraEnv: Record<string, string> = { FORCE_COLOR: "0", JCUT_IPC_DIR: ipcDir };
   if (useLocal || s.hybridMode) {
     extraEnv.LMSTUDIO_URL = s.lmStudioUrl;
     if (s.lmStudioCoderModel) extraEnv.LMSTUDIO_CODER_MODEL = s.lmStudioCoderModel;
@@ -400,6 +407,7 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
     const child = spawn(NODE_BIN, agentArgs, {
       env: nodeEnv(extraEnv), cwd: PROJECT_ROOT, detached: true,
     });
+    (child as any).__runId = runId || "";
     agentProcs.set(winId, child);
     // Guard every send: if the window/webContents was destroyed (closed, crashed,
     // navigated), e.sender.send throws "Object has been destroyed" and takes down
@@ -413,16 +421,19 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
     const finish = (code: number | null, errMsg?: string) => {
       if (settled) return;
       settled = true;
+      try { (child as any).__ipcCleanup?.(); } catch { /* */ }
       // Only clear the map slot if it's STILL this child — a newer (steering) run
       // may have already replaced it; don't delete the new run's entry.
       if (agentProcs.get(winId) === child) agentProcs.delete(winId);
-      // If a newer run superseded this one (steering/follow-up), DO NOT emit
-      // agent-done — that would clear the new run's busy state and orphan its
-      // output. The new run owns the "done" lifecycle now.
-      if ((child as any).__superseded) { resolve({ ok: false }); return; }
-      if (errMsg) send("agent-chunk", `\n⚠️ ${errMsg}\n`);
-      send("agent-done", String(code ?? 0)); // ALWAYS fire so the UI clears "busy"
-      resolve({ ok: code === 0 });
+      // If a newer run superseded this one (steering/follow-up), still resolve, but
+      // tag the agent-done with this child's run id. The renderer's per-run
+      // generation guard ignores any done that isn't from the CURRENT run, so a
+      // superseded child's done is dropped there — we don't suppress it here,
+      // because suppression left the UI stuck "busy" when timing raced.
+      if (errMsg && !(child as any).__superseded) send("agent-chunk", `\n⚠️ ${errMsg}\n`);
+      const tag = (child as any).__runId ? `:${(child as any).__runId}` : "";
+      send("agent-done", `${code ?? 0}${tag}`); // ALWAYS fire so the UI can clear "busy"
+      resolve({ ok: code === 0 && !(child as any).__superseded });
     };
     child.stdout?.on("data", (d) => {
       let out = d.toString();
@@ -433,6 +444,42 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?
       }
       if (out) send("agent-chunk", out);
     });
+    // Watch the per-run IPC dir for native-dialog requests written by the `jc` CLI
+    // (it runs inside the agent, so it can't reach us via stdout). When a
+    // save-request appears, show the macOS Save panel and write the chosen path to
+    // the response file the CLI is polling.
+    const handledSaveReqs = new Set<string>();
+    const handleSaveRequest = (file: string) => {
+      if (!file.startsWith("save-request-") || !file.endsWith(".json")) return;
+      if (handledSaveReqs.has(file)) return;
+      handledSaveReqs.add(file);
+      const reqPath = path.join(ipcDir, file);
+      let req: any;
+      try { req = JSON.parse(fsSync.readFileSync(reqPath, "utf8")); } catch { return; }
+      const w = BrowserWindow.fromWebContents(e.sender) || BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+      dialog.showSaveDialog(w!, {
+        title: "Save Premiere Pro project",
+        defaultPath: req.defaultName || "Sequence.prproj",
+        filters: [{ name: "Premiere Pro Project", extensions: ["prproj"] }],
+      }).then((res) => {
+        let chosen = "__CANCELLED__";
+        if (!res.canceled && res.filePath) {
+          chosen = res.filePath.endsWith(".prproj") ? res.filePath : res.filePath + ".prproj";
+        }
+        try { fsSync.writeFileSync(req.respFile, chosen); } catch { /* CLI times out → default */ }
+      }).catch(() => {
+        try { fsSync.writeFileSync(req.respFile, "__CANCELLED__"); } catch { /* */ }
+      });
+    };
+    let ipcWatcher: fsSync.FSWatcher | null = null;
+    try {
+      ipcWatcher = fsSync.watch(ipcDir, (_evt, fname) => { if (fname) handleSaveRequest(String(fname)); });
+    } catch { /* watch unsupported — export falls back to default path */ }
+    // Also sweep once shortly after start in case the file landed before the watcher.
+    const ipcSweep = setInterval(() => {
+      try { for (const f of fsSync.readdirSync(ipcDir)) handleSaveRequest(f); } catch { /* */ }
+    }, 1000);
+    (child as any).__ipcCleanup = () => { try { ipcWatcher?.close(); } catch {} clearInterval(ipcSweep); };
     child.stderr?.on("data", (d) => send("agent-chunk", d.toString()));
     child.on("close", (code) => finish(code));
     // If spawn itself fails (bad node path, etc.), still clear busy in the UI.
@@ -469,14 +516,19 @@ function killTree(proc: ChildProcess) {
 }
 
 // Interrupt this window's running agent (the "stop" button — steer/interrupt).
-ipcMain.handle("agent-stop", (e) => {
+ipcMain.handle("agent-stop", (e, runId?: string) => {
   const winId = BrowserWindow.fromWebContents(e.sender)?.id ?? -1;
   const proc = agentProcs.get(winId);
+  // Tag the stop-done with the runId of the run being stopped, so the renderer can
+  // tell whether this "-1" belongs to the run it's still showing or to an older,
+  // steered-away run (whose done must NOT clear the current run's busy state).
+  const tag = runId ? `:${runId}` : (proc && (proc as any).__runId ? `:${(proc as any).__runId}` : "");
   if (proc) {
+    (proc as any).__superseded = true; // its own close→finish won't double-send
     killTree(proc);
     agentProcs.delete(winId);
     try {
-      if (e.sender && !e.sender.isDestroyed()) e.sender.send("agent-done", "-1");
+      if (e.sender && !e.sender.isDestroyed()) e.sender.send("agent-done", `-1${tag}`);
     } catch { /* renderer gone — ignore */ }
     return { ok: true, stopped: true };
   }

@@ -128,7 +128,18 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [mode, setModeState] = useState<Mode>("dark");
   const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
-  const [claudeUsage, setClaudeUsage] = useState<{ utilization: number; resetsAt?: any; type?: string } | null>(null);
+  // Persisted across restarts: the SDK emits quota events sparsely, so we cache the
+  // last known utilization in localStorage and show it immediately on launch.
+  const [claudeUsage, setClaudeUsageState] = useState<{ utilization: number; resetsAt?: any; type?: string; status?: string } | null>(() => {
+    try { const v = localStorage.getItem("jcut.claudeUsage"); return v ? JSON.parse(v) : null; } catch { return null; }
+  });
+  const setClaudeUsage = (info: { utilization: number; resetsAt?: any; type?: string; status?: string } | null) => {
+    setClaudeUsageState(info);
+    try {
+      if (info) localStorage.setItem("jcut.claudeUsage", JSON.stringify(info));
+      else localStorage.removeItem("jcut.claudeUsage");
+    } catch { /* storage full / unavailable — non-fatal */ }
+  };
   const [showSettings, setShowSettings] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -286,6 +297,16 @@ export default function App() {
   }, [workspace]);
 
   useEffect(() => { if (settings) refreshTimeline(); }, [settings, refreshTimeline]);
+  // Claude quota bar: the backend forwards rate-limit events as a dedicated
+  // `usage-update` IPC message (main.ts strips it out of the chat stream, so the
+  // per-run chunk parser never sees it). Subscribe ONCE here, app-wide, so the bar
+  // updates whenever the SDK reports new utilization — independent of any single run.
+  useEffect(() => {
+    const off = window.jcut.onUsageUpdate((info) => {
+      if (info && typeof info.utilization === "number") setClaudeUsage(info);
+    });
+    return off;
+  }, []);
   useEffect(() => { scrollRef.current?.scrollTo({ top: 1e9, behavior: "smooth" }); }, [messages]);
   useEffect(() => {
     if (busy || !messages.length) return;
@@ -298,6 +319,9 @@ export default function App() {
 
   const runCleanupRef = useRef<(() => void) | null>(null);
   const runGenRef = useRef(0);
+  // The runId of the run currently in flight (set when a run starts, used to tell
+  // the backend EXACTLY which run to stop on a steer/Stop press).
+  const currentRunIdRef = useRef<string | null>(null);
 
   const send = async (text: string) => {
     if (!text.trim()) return;
@@ -307,27 +331,47 @@ export default function App() {
     const steering = busy;
     if (busy) {
       // Tear down the CURRENT run's listeners and bump the generation so any late
-      // events from the old run are ignored. We do NOT call stopAgent() here — the
-      // backend's runAgent supersedes (kills) the old process itself and suppresses
-      // its agent-done, so a separate stop would just race. The new run starts below.
+      // events (chunks/done) from the old run are ignored by their gen guard.
+      // We also call stopAgent() so the backend kills the old process immediately —
+      // belt-and-suspenders with the backend's own supersede-on-new-run. The new
+      // run carries its own runId, so even if the old run's `done` races through,
+      // its mismatched runId means it can't clear the new run's busy state.
       runGenRef.current += 1;
       runCleanupRef.current?.();
       runCleanupRef.current = null;
       streamRef.current = "";
-      setMessages((m) => {
-        const copy = [...m];
-        const last = copy[copy.length - 1];
-        if (last?.role === "agent" && !last.text) copy.pop();
-        return copy;
-      });
+      // Stop the OLD run by its id so its done is tagged with the old runId and
+      // can't be mistaken for the new run's completion.
+      window.jcut.stopAgent(currentRunIdRef.current || undefined).catch(() => {});
     }
     const myGen = ++runGenRef.current;
+    // A unique id for THIS run. The backend tags agent-done with it; we ignore any
+    // done whose id isn't ours, so a superseded (steered-away) run's late "done"
+    // can never clear the current run's busy state.
+    const myRunId = `${myGen}-${Date.now()}`;
+    currentRunIdRef.current = myRunId;
     setInput("");
-    const updatedMessages: Msg[] = [...messages, { role: "user", text }, { role: "agent", text: "" }];
-    setMessages(updatedMessages);
+    // NOTE: do NOT blank claudeUsage here. The SDK only emits a rate_limit_event
+    // when the quota actually CHANGES (often not every turn), so clearing it each
+    // send would hide the bar almost always. We keep the last known value visible
+    // and let a fresh event update it.
+    // Append this turn to the LATEST messages (functional update) — never the stale
+    // closure `messages`, which during a rapid steer can be a turn behind and would
+    // drop the in-progress agent text. Drop a trailing empty agent bubble (the
+    // steered-away run's placeholder) before appending the new turn.
+    let snapshot: Msg[] = [];
+    setMessages((m) => {
+      const base = [...m];
+      const last = base[base.length - 1];
+      if (last?.role === "agent" && !last.text) base.pop();
+      const next: Msg[] = [...base, { role: "user", text }, { role: "agent", text: "" }];
+      snapshot = next;
+      return next;
+    });
     setBusy(true);
     streamRef.current = "";
-    setClaudeUsage(null);
+    // persistChat below needs the freshly-built message list.
+    const updatedMessages: Msg[] = snapshot;
 
     // PERSIST IMMEDIATELY: Save the user's message to disk right away, so it is never lost
     // even if the app crashes or is killed during the model run. Also establishes the
@@ -351,6 +395,7 @@ export default function App() {
       if (hbTimer) clearTimeout(hbTimer);
       offChunk(); offDone();
       runCleanupRef.current = null;
+      if (currentRunIdRef.current === myRunId) currentRunIdRef.current = null;
       setMessages((m) => {
         const copy = [...m];
         const last = copy[copy.length - 1];
@@ -409,17 +454,23 @@ export default function App() {
         return copy;
       });
     });
-    const offDone = window.jcut.onAgentDone(async () => {
+    const offDone = window.jcut.onAgentDone(async (code: string) => {
+      // The backend tags done as "<code>:<runId>". If a runId is present and it
+      // isn't ours, this done belongs to a superseded run — ignore it entirely so
+      // it can't tear down OUR handlers or clear OUR busy state.
+      const doneRunId = typeof code === "string" && code.includes(":") ? code.split(":").slice(1).join(":") : "";
+      if (doneRunId && doneRunId !== myRunId) return;
       if (hbTimer) clearTimeout(hbTimer);
       if (runGenRef.current !== myGen) { offChunk(); offDone(); return; }
       offChunk(); offDone();
       runCleanupRef.current = null;
+      if (currentRunIdRef.current === myRunId) currentRunIdRef.current = null;
       setBusy(false);
       await refreshTimeline();
     });
     runCleanupRef.current = () => { if (hbTimer) clearTimeout(hbTimer); offChunk(); offDone(); };
     bumpHeartbeat(); // start the watchdog now that handlers are wired
-    window.jcut.runAgent(text, chatIdRef.current || undefined, steering).catch(() => { forceFinish("Could not start the editor."); });
+    window.jcut.runAgent(text, chatIdRef.current || undefined, steering, myRunId).catch(() => { forceFinish("Could not start the editor."); });
   };
 
   const retryFrom = (i: number) => {
@@ -434,7 +485,8 @@ export default function App() {
     runCleanupRef.current?.();
     runCleanupRef.current = null;
     streamRef.current = "";
-    window.jcut.stopAgent().catch(() => {});
+    window.jcut.stopAgent(currentRunIdRef.current || undefined).catch(() => {});
+    currentRunIdRef.current = null;
     // Append the stop marker AND persist the partial chat immediately, so a later
     // "continue" can detect the interrupted turn and resume near where it left off.
     // We compute the updated messages synchronously and save them — relying on the
@@ -611,24 +663,28 @@ export default function App() {
 
             {/* Right: mode picker + settings */}
             <div className="ml-auto flex items-center gap-2">
-              {settings.backend === "claude" && claudeUsage && (
-                <div 
+              {/* Claude quota bar. Always present in Claude mode so it's discoverable;
+                  shows "—" until the SDK reports the first rate-limit event, then the
+                  real utilization. (The event only fires when the quota changes, so an
+                  empty bar early in a session is expected, not a bug.) */}
+              {settings.backend === "claude" && (
+                <div
                   className="flex items-center gap-2 rounded-lg depth-chip px-2.5 py-1 text-[11.5px] font-medium transition-all"
-                  title={claudeUsageTitle(claudeUsage)}
+                  title={claudeUsage ? claudeUsageTitle(claudeUsage) : "Claude usage — updates as you work (subscription rate limit)"}
                 >
                   <span className="text-dim text-[10px] tracking-wide">Usage</span>
                   <div className="relative h-1.5 w-14 overflow-hidden rounded-full bg-surface2">
-                    <div 
+                    <div
                       className="h-full rounded-full transition-all duration-500"
                       style={{
-                        width: `${Math.min(100, claudeUsage.utilization * 100)}%`,
-                        background: claudeUsage.utilization > 0.85 
-                          ? "linear-gradient(90deg, #ef4444, #f97316)" 
-                          : "linear-gradient(90deg, #0d9488, #14b8a6)" 
+                        width: `${claudeUsage ? Math.min(100, claudeUsage.utilization * 100) : 0}%`,
+                        background: claudeUsage && claudeUsage.utilization > 0.85
+                          ? "linear-gradient(90deg, #ef4444, #f97316)"
+                          : "linear-gradient(90deg, #0d9488, #14b8a6)"
                       }}
                     />
                   </div>
-                  <span className="text-dim text-[10px]">{Math.round(claudeUsage.utilization * 100)}%</span>
+                  <span className="text-dim text-[10px]">{claudeUsage ? `${Math.round(claudeUsage.utilization * 100)}%` : "—"}</span>
                 </div>
               )}
               <ModePicker value={settings.mode} onChange={(id) => patch({ mode: id })} onManagePresets={() => setShowSettings(true)} />

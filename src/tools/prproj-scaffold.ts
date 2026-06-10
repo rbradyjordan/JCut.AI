@@ -1290,8 +1290,8 @@ export const CLIP_TEMPLATE = `	<VideoClipTrackItem ObjectID="__VCTI_ID__" ClassI
 		<Clip Version="18">
 			<Node Version="1">
 				<Properties Version="1">
-					<asl.clip.label.color>6769408</asl.clip.label.color>
-					<asl.clip.label.name>BE.Prefs.LabelColors.1</asl.clip.label.name>
+					<asl.clip.label.color>__LABEL_COLOR_RGB__</asl.clip.label.color>
+					<asl.clip.label.name>__LABEL_COLOR_NAME__</asl.clip.label.name>
 				</Properties>
 			</Node>
 			<MarkerOwner Version="1">
@@ -1484,8 +1484,52 @@ export const CLIP_TEMPLATE = `	<VideoClipTrackItem ObjectID="__VCTI_ID__" ClassI
 // Empty per-clip Markers object (referenced by VideoClip.MarkerOwner).
 export const MARKERS_TEMPLATE = `	<Markers ObjectID="__MARKERS_ID__" ClassID="bee50706-b524-416c-9f03-b596ce5f6866" Version="4">
 		<Markers Version="1">
-		</Markers>
+__MARKER_ENTRIES__		</Markers>
+		<ByGUID>byGUID</ByGUID>
 		<LastMetadataState>00000000-0000-0000-0000-000000000000</LastMetadataState>
 		<LastContentState>00000000-0000-0000-0000-000000000000</LastContentState>
 	</Markers>
 `;
+
+// One entry inside a <Markers> container — links the marker GUID to its detail
+// object. __INDEX__, __GUID__, __DETAIL_ID__.
+export const MARKER_ENTRY_TEMPLATE =
+  `			<Marker Version="1" Index="__INDEX__"><First>__GUID__</First><Second ObjectRef="__DETAIL_ID__"/></Marker>\n`;
+
+// A sequence marker's detail object. The DVAMarker JSON carries everything Premiere
+// shows on the timeline ruler: the GUID, start time (ticks), a Comment-type marker,
+// its name (the visible label), and a color index (0-7). __DETAIL_ID__, __GUID__,
+// __TICKS__, __NAME__, __DURATION_TICKS__, __COLOR_INDEX__.
+export const MARKER_DETAIL_TEMPLATE =
+  `	<Marker ObjectID="__DETAIL_ID__" ClassID="a45508e0-3ff7-4d04-90a7-2e0dfff4c910" Version="3">\n` +
+  `		<DVAMarker>{"DVAMarker":{"mMarkerID":"__GUID__","mStartTime":{"ticks":__TICKS__},"mDuration":{"ticks":__DURATION_TICKS__},"mType":"Comment","mName":"__NAME__","mColorIndex":__COLOR_INDEX__}}</DVAMarker>\n` +
+  `	</Marker>\n`;
+
+// JCut marker color name → Premiere marker color index (Premiere's standard 8-color
+// marker palette order). Used for sequence markers AND clip label colors.
+export const MARKER_COLOR_INDEX: Record<string, number> = {
+  green: 0,
+  red: 1,
+  purple: 2,
+  violet: 2,
+  orange: 3,
+  yellow: 4,
+  white: 5,
+  blue: 6,
+  cyan: 7,
+};
+
+// Premiere clip label color NAMES (asl.clip.label.color/name). Maps a JCut marker
+// color to the nearest Premiere label color name + its RGB, so categorized clips
+// show a matching label swatch in the Project panel and timeline.
+export const CLIP_LABEL: Record<string, { name: string; color: string }> = {
+  green:  { name: "Green",  color: "0,200,0" },
+  red:    { name: "Rose",   color: "230,80,110" },
+  purple: { name: "Violet", color: "150,90,210" },
+  violet: { name: "Violet", color: "150,90,210" },
+  orange: { name: "Mango",  color: "230,150,40" },
+  yellow: { name: "Yellow", color: "220,200,60" },
+  white:  { name: "White",  color: "230,230,230" },
+  blue:   { name: "Blue",   color: "70,120,230" },
+  cyan:   { name: "Cerulean", color: "60,180,210" },
+};

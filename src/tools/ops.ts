@@ -28,6 +28,16 @@ export interface AddOp {
   volume_db?: number;
   speed?: number;
   video_only?: boolean;
+  label_color?: string;
+  category?: string;
+}
+
+// Accepted clip/marker label colors. Anything else is dropped (no label).
+const LABEL_COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "violet", "white", "purple"];
+function normColor(v: any): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const c = v.trim().toLowerCase();
+  return LABEL_COLORS.includes(c) ? c : undefined;
 }
 
 function resolveSource(workspace: string, source: string): string {
@@ -87,6 +97,8 @@ function normalizeAddOp(raw: any, index: number): AddOp {
     scale_x: raw.scale_x, scale_y: raw.scale_y,
     position_x: raw.position_x, position_y: raw.position_y,
     volume_db: raw.volume_db, speed: raw.speed, video_only: raw.video_only,
+    label_color: normColor(raw.label_color ?? raw.color ?? raw.label_colour),
+    category: typeof raw.category === "string" ? raw.category.trim() || undefined : undefined,
   };
 }
 
@@ -202,8 +214,11 @@ export async function addClips(
       source_height: probe.height,
       source_fps: probe.fps,
       source_duration: probe.duration,
+      ...(probe.rotation ? { source_rotation: probe.rotation } : {}),
       has_audio: probe.has_audio,
       clip_type: type,
+      ...(op.label_color ? { label_color: op.label_color } : {}),
+      ...(op.category ? { category: op.category } : {}),
     };
     seq.clips.push(videoClip);
     created.push(videoClip);
@@ -255,6 +270,7 @@ export interface UpdateOp {
   position_x?: number;
   position_y?: number;
   rotation?: number;
+  label_color?: string;
 }
 
 // Update clips. Duration-altering changes ripple downstream clips on the same
@@ -296,6 +312,10 @@ export function updateClips(
     }
     if (op.volume_db != null) c.volume_db = op.volume_db;
     if (op.track != null) c.track = op.track;
+    if ((op as any).label_color != null || (op as any).color != null) {
+      const col = normColor((op as any).label_color ?? (op as any).color);
+      if (col) c.label_color = col;
+    }
     if (c.transform) {
       if (op.scale_x != null) c.transform.scale.x = op.scale_x;
       if (op.scale_y != null) c.transform.scale.y = op.scale_y;
