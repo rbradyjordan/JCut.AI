@@ -91,29 +91,23 @@ export default function RelinkModal({
     }
   }, [workspace, onRelinked]);
 
-  // Batch-relink: pick ONE file from a folder, then try to match every other
-  // offline clip from the same original directory by filename.
+  // Batch-relink: open a folder picker, then relink every offline clip from this
+  // group by looking for a file with the same name inside the chosen folder.
   const relinkFolder = useCallback(async (group: RelinkGroup) => {
     const remaining = group.sources.filter((s) => !done.has(s.rel));
     if (!remaining.length) return;
 
-    // Open Finder at the group's original directory.
-    const picked = await window.jcut.pickRelink(group.dir || undefined);
+    // Use the folder picker so Finder opens as a directory browser.
+    const picked = await window.jcut.pickFolder();
     if (!picked.ok || !picked.path) return;
 
-    const pickedDir = dirname(picked.path);
+    const folder = picked.path;
 
-    // Relink every offline clip from this group: if the filename exists in the
-    // picked directory, use it. Otherwise fall back to the exact picked file.
+    // For every offline clip in this group, try <chosen folder>/<clip filename>.
     for (const s of remaining) {
       setBusy((b) => new Set(b).add(s.rel));
       try {
-        // Try: same-named file in the chosen directory first.
-        const candidate = joinPath(pickedDir, s.name);
-        // We can't check existence in the renderer, so always try candidate —
-        // the CLI will error if it doesn't exist, and we fall back to picked.path.
-        const targetPath = s.rel === remaining[0].rel ? picked.path : candidate;
-
+        const targetPath = joinPath(folder, s.name);
         const r = await window.jcut.jc("source-relink", [
           "--workspace", workspace,
           "--rel", s.rel,
@@ -202,10 +196,10 @@ export default function RelinkModal({
                           disabled={groupBusy}
                           className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
                           style={{ background: TEAL_GRADIENT }}
-                          title={`Relink all ${remaining.length} clips from this folder at once`}
+                          title={`Pick the folder containing these ${remaining.length} clips — JCut will match by filename`}
                         >
-                          <Link size={12} stroke={2} />
-                          Relink folder ({remaining.length})
+                          <Folder size={12} stroke={2} />
+                          Select folder ({remaining.length} clips)
                         </motion.button>
                       )}
                       {groupDone && (
