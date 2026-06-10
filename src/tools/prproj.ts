@@ -701,10 +701,17 @@ export function buildPrprojXml(
   );
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 6. Audio master mixer — the verified static scaffold (AudioMixTrack 50-64),
-  //    wired to the A1 track's UID.
+  // 6. Audio master mixer + A1 AudioClipTrack — the verified static scaffold
+  //    (AudioClipTrack + AudioMixTrack + pan/fader/meter chain, IDs 50-64). This
+  //    INCLUDES the one audio track Premiere always needs, fully wired. Our code
+  //    does NOT emit its own AudioClipTrack (the scaffold provides it).
   // ─────────────────────────────────────────────────────────────────────────────
-  parts.push(AUDIO_MIXER.replace(/__A1_TRACK_UID__/g, a1Uid));
+  parts.push(
+    AUDIO_MIXER
+      .replace(/__A1_TRACK_UID__/g, a1Uid)
+      .replace(/__A1_TRACK_NUM__/g, String(videoTracks.length + 1))
+      .replace(/__A1_NAME__/g, "A1"),
+  );
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 7. VideoClipTrack per V track (lists its items in ClipItems.TrackItems)
@@ -748,42 +755,9 @@ export function buildPrprojXml(
     );
   });
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // 8. AudioClipTrack per A track (always at least A1, even if it has no clips)
-  // ─────────────────────────────────────────────────────────────────────────────
-  ensureAudioTracks.forEach((tname, tIndex) => {
-    const trackClips = seq.clips.filter((c) => c.track === tname);
-    const itemRefs = trackClips
-      .map((c, i) => `\t\t\t\t\t<TrackItem Index="${i}" ObjectRef="${clipMap.get(c.id)!.itemId}"/>\n`)
-      .join("");
-    parts.push(
-      `\t<AudioClipTrack ObjectUID="${audioTrackUid.get(tname)}" ClassID="097f6203-99ae-11d5-84f2-8cf14bde7040" Version="6">\n` +
-      `\t\t<ClipTrack Version="2">\n` +
-      `\t\t\t<Track Version="3">\n` +
-      `\t\t\t\t<Node Version="1"><Properties Version="1">\n` +
-      `\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n` +
-      `\t\t\t\t\t<MZ.TrackTargeted>1</MZ.TrackTargeted>\n` +
-      `\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n` +
-      `\t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n` +
-      `\t\t\t\t</Properties></Node>\n` +
-      `\t\t\t\t<ID>${videoTracks.length + tIndex + 1}</ID>\n` +
-      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
-      `\t\t\t\t<Index>${tIndex}</Index>\n` +
-      `\t\t\t</Track>\n` +
-      `\t\t\t<ClipItems Version="3">\n` +
-      `\t\t\t\t<TrackItems Version="1">\n${itemRefs}\t\t\t\t</TrackItems>\n` +
-      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
-      `\t\t\t\t<Index>${tIndex}</Index>\n` +
-      `\t\t\t</ClipItems>\n` +
-      `\t\t\t<TransitionItems Version="3">\n` +
-      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
-      `\t\t\t\t<Index>${tIndex}</Index>\n` +
-      `\t\t\t</TransitionItems>\n` +
-      `\t\t</ClipTrack>\n` +
-      `\t\t<Name>${esc(tname)}</Name>\n` +
-      `\t</AudioClipTrack>\n`,
-    );
-  });
+  // NOTE: The A1 AudioClipTrack is emitted as part of the AUDIO_MIXER scaffold
+  // (section 6) — fully wired with its AudioTrack/Panner/component chain. We do
+  // not hand-build audio tracks here. (Audio CLIPS aren't placed yet; warned above.)
 
   // VideoClipTrackItems are emitted by the per-clip template (section 2+3). Just
   // count the video clips we actually placed.

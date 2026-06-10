@@ -29,6 +29,7 @@ export {
   IconSun           as Sun,
   IconFile          as File,
   IconFileText      as FileText,
+  IconPaperclip     as Paperclip,
   IconShieldLock    as Shield,
   IconWifiOff       as Offline,
   IconCloud         as Cloud,

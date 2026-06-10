@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { applyTheme, applyDisplay, spring, Mode, Accent, DEFAULT_ACCENT, isAccent, TEAL_GRADIENT } from "./theme";
-import { Close, Settings as SettingsIcon, Warning, Clapper, ChevronRight, Music, Bolt, Cpu, Film, Brain, Sparkle } from "./Icons";
+import { Close, Settings as SettingsIcon, Warning, Clapper, ChevronRight, Music, Bolt, Cpu, Film, Brain, Sparkle, Paperclip } from "./Icons";
 import Settings from "./Settings";
 import Shortcuts from "./Shortcuts";
 import About from "./About";
@@ -633,7 +633,14 @@ export default function App() {
                       </motion.div>
                     )}
                   </AnimatePresence>
-                  <ChatInput value={input} onChange={setInput} onSend={() => send(input)} onStop={stop} busy={busy} />
+                  <ChatInput value={input} onChange={setInput} onSend={() => send(input)} onStop={stop} busy={busy}
+                    onAttachDoc={async () => {
+                      const picked = await window.jcut.pickDocument?.();
+                      if (!picked?.ok || !picked.paths?.length) return;
+                      await window.jcut.jc("source-add", ["--workspace", workspace, "--files", ...picked.paths]);
+                      refreshTimeline?.();
+                    }}
+                  />
                 </div>
               </div>
             </div>
@@ -1005,12 +1012,25 @@ function Welcome({ onPick, workspace }: { onPick: (s: string) => void; workspace
 
 // ─── Chat input ───────────────────────────────────────────────────────────────
 
-function ChatInput({ value, onChange, onSend, onStop, busy }: {
+function ChatInput({ value, onChange, onSend, onStop, busy, onAttachDoc }: {
   value: string; onChange: (v: string) => void;
   onSend: () => void; onStop: () => void; busy: boolean;
+  onAttachDoc?: () => void;
 }) {
   return (
-    <div className="no-drag flex items-end gap-2 rounded-2xl depth-chip px-4 py-3  focus-within:ring-accent/30 transition-shadow">
+    <div className="no-drag flex items-end gap-2 rounded-2xl depth-chip px-3 py-3 focus-within:ring-accent/30 transition-shadow">
+      {/* Paperclip — attach a document (script / brief / shot list) */}
+      {onAttachDoc && (
+        <motion.button
+          whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.92 }}
+          onClick={onAttachDoc}
+          className="mb-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-xl text-dim transition-colors hover:bg-surface2 hover:text-ink"
+          title="Attach a document — script, brief, or shot list (the editor reads it for a more complete first draft)"
+          aria-label="Attach document"
+        >
+          <Paperclip size={16} stroke={1.6} />
+        </motion.button>
+      )}
       <textarea
         rows={1}
         value={value}
