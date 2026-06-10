@@ -594,11 +594,10 @@ export const PROJECT_PREFIX = `	<Project ObjectRef="1"/>
 				<MZ.Project.GUID>35a165b9-8e4e-4dc9-a286-9b0a866f140c</MZ.Project.GUID>
 				<Project.Metadata.Schema>&lt;?xml version="1.0" encoding="UTF-8" ?&gt;&#10;&lt;xmp_definitions&gt;&#10;	&lt;xmp_schema namespace="http://ns.adobe.com/premierePrivateProjectMetaData/1.0/" prefix="premierePrivateProjectMetaData" label="$$$/Premiere/PrivateProProjectMetaData_label=Premiere Project Metadata"&gt;&#10;	&lt;/xmp_schema&gt;&#10;&lt;/xmp_definitions&gt;&#10;</Project.Metadata.Schema>
 				<MZ.BuildVersion.Created>26.0.0x72 - Wed Jan 28 16:51:01 2026</MZ.BuildVersion.Created>
-				<MZ.BuildVersion.Modified>26.2.0x65 - Mon Jun  8 01:37:24 2026</MZ.BuildVersion.Modified>
+				<MZ.BuildVersion.Modified>26.0.0x72 - Wed Jan 28 16:51:16 2026</MZ.BuildVersion.Modified>
 				<MZ.Project.ApplicationID>Pro</MZ.Project.ApplicationID>
 				<TL.PJSnappingState>1</TL.PJSnappingState>
-				<MZ.PrefixKey.OpenSequenceGuidList.1>c7f5b25f-e1a5-4bbf-bf8d-195858b09926</MZ.PrefixKey.OpenSequenceGuidList.1>
-				<MZ.PrefixKey.OpenSequenceGuidList.2>43726f2a-8d02-415b-bc02-e969f686b9ae</MZ.PrefixKey.OpenSequenceGuidList.2>
+				<MZ.PrefixKey.OpenSequenceGuidList.1>__SEQUENCE_UID__</MZ.PrefixKey.OpenSequenceGuidList.1>
 			</Properties>
 		</Node>
 		<RootProjectItem ObjectURef="297ab217-bd92-4c5f-ba6a-b6f8b848dbcd"/>

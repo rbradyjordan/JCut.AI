@@ -471,7 +471,11 @@ export function buildPrprojXml(
   //    RootProjectItem, BinProjectItem, ClipProjectItem, ProjectSettings, etc.).
   //    Only the project name is parameterized.
   // ─────────────────────────────────────────────────────────────────────────────
-  parts.push(PROJECT_PREFIX.replace(/__PROJECT_NAME__/g, esc(seq.name || "JCut Project")));
+  parts.push(
+    PROJECT_PREFIX
+      .replace(/__PROJECT_NAME__/g, esc(seq.name || "JCut Project"))
+      .replace(/__SEQUENCE_UID__/g, seqUid),
+  );
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 2+3. Per-clip editorial — stamp the verified CLIP_TEMPLATE once per VIDEO clip
