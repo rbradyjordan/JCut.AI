@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("jcut", {
   lmStudioTest: (url) => ipcRenderer.invoke("lmstudio-test", url),
 
   // agent run + steer/interrupt
-  runAgent: (prompt, chatId) => ipcRenderer.invoke("agent-run", prompt, chatId),
+  runAgent: (prompt, chatId, steering) => ipcRenderer.invoke("agent-run", prompt, chatId, steering),
   stopAgent: () => ipcRenderer.invoke("agent-stop"),
   onAgentChunk: (cb) => {
     const h = (_e, chunk) => cb(chunk);
@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("jcut", {
   },
 
   pickMedia: () => ipcRenderer.invoke("pick-media"),
+  pickDocument: () => ipcRenderer.invoke("pick-document"),
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
   pickPrproj: () => ipcRenderer.invoke("pick-prproj"),
   pickSavePrproj: (defaultName) => ipcRenderer.invoke("pick-save-prproj", defaultName),

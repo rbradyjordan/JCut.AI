@@ -277,14 +277,16 @@ function parseCliArgs(argv: string[]) {
   let coderModel = process.env.LMSTUDIO_CODER_MODEL || "local-model";
   let visionModel = process.env.LMSTUDIO_VISION_MODEL || "local-vision-model";
   let chatId = "";
+  let steering = false;
   const promptParts: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace") workspace = argv[++i];
     else if (argv[i] === "--model") coderModel = argv[++i];
     else if (argv[i] === "--chat-id") chatId = argv[++i];
+    else if (argv[i] === "--steering") steering = true;
     else promptParts.push(argv[i]);
   }
-  return { workspace, coderModel, visionModel, chatId, prompt: promptParts.join(" ").trim() };
+  return { workspace, coderModel, visionModel, chatId, steering, prompt: promptParts.join(" ").trim() };
 }
 
 const SERVER_HINT =
@@ -453,7 +455,7 @@ function trimContext(messages: any[]): void {
 }
 
 async function main() {
-  const { workspace, coderModel, visionModel, chatId, prompt } = parseCliArgs(process.argv.slice(2));
+  const { workspace, coderModel, visionModel, chatId, steering, prompt } = parseCliArgs(process.argv.slice(2));
   if (!prompt) {
     console.error('Usage: npm run edit:local -- "your request" [--workspace name] [--model id]');
     process.exit(1);
@@ -484,6 +486,13 @@ async function main() {
       ].filter((n: string) => typeof n === "string" && !n.startsWith("._") && !n.startsWith("."));
       if (allSources.length > 0) {
         sourcesContext = `\nFOOTAGE IN WORKSPACE:\n${allSources.slice(0, 30).join("\n")}${allSources.length > 30 ? `\n... and ${allSources.length - 30} more` : ""}`;
+      }
+      const docs = (src.documents || []).map((s: any) => s.name || s.rel || s)
+        .filter((n: string) => typeof n === "string" && !n.startsWith("._") && !n.startsWith("."));
+      if (docs.length > 0) {
+        // Reference docs (script/brief/shot list). Flag them so the model reads
+        // them for intent before drafting — they drive selection and ordering.
+        sourcesContext += `\nREFERENCE DOCUMENTS (read these first for intent — paths: source/documents/<name>):\n${docs.slice(0, 10).join("\n")}`;
       }
     }
   } catch { /* workspace may not exist yet */ }
@@ -533,7 +542,7 @@ async function main() {
     `\n` +
     `RULES:\n` +
     `1. Greetings/small talk → reply warmly in plain English. No tool needed.\n` +
-    `2. Editing tasks → use the jc tool. It is the ONLY way to touch footage or the timeline.\n` +
+    `2. Editing/Exporting tasks → use the jc tool. It is the ONLY way to touch footage, edit, or export the timeline.\n` +
     `   ACTUALLY CALL the tool — never write the command as text like "jc sources-list" in your\n` +
     `   reply. Writing it as text does NOTHING. Emit a real tool call.\n` +
     `3. The workspace is automatic — DO NOT include --workspace in your args. Ever.\n` +
@@ -545,6 +554,12 @@ async function main() {
     `   sequence-clips-add call (10–20 at once), NOT one clip per call. Each tool call\n` +
     `   is slow, so adding clips one at a time wastes minutes. Plan the section, then add\n` +
     `   all its clips in a single call.\n` +
+    `9. IMMEDIATELY EXECUTE & DO NOT ASK FOR PERMISSION: If the user requests a task (such as\n` +
+    `   "export the project", "export it", "make a rough cut", "add clips"), do NOT ask\n` +
+    `   for confirmation, do NOT ask "Would you like me to...?", and do NOT ask for permission.\n` +
+    `   Immediately execute the corresponding tool. If the user asks to "export the project" or\n` +
+    `   "export it" and there is a sequence marked as "← most recent" in the sequences list,\n` +
+    `   immediately run "sequence-export-premiere" with that sequence ID. Do NOT ask which sequence.\n` +
     `\n` +
     `WORKFLOW for any edit:\n` +
     `  1. sources-list → get exact file paths\n` +
@@ -618,10 +633,11 @@ async function main() {
   const lastAgentMsg = [...chatHistory].reverse().find((m) => m.role === "agent");
   const wasCancelled = lastAgentMsg && /⏹\s*stopped|went quiet|time limit/i.test(lastAgentMsg.text || "");
   const wantsContinue = /\b(continue|keep going|resume|pick up|finish|carry on|where you left)\b/i.test(prompt);
-  // Resume if EITHER the last turn was cancelled OR the user explicitly asks to
-  // continue AND there's a work-in-progress sequence on disk (the saved JSON).
+  // Resume if the last turn was cancelled, OR the user explicitly asks to continue
+  // with a WIP sequence, OR this is a mid-task steering redirect (the --steering
+  // flag set when the user typed while a run was in progress).
   const hasInProgress = !!latestSeq && latestSeq.clips > 0;
-  if (wasCancelled || (wantsContinue && hasInProgress)) {
+  if (wasCancelled || steering || (wantsContinue && hasInProgress)) {
     const lastLines = ((lastAgentMsg?.text) || "").split("\n").filter((l: string) => l.trim()).slice(-6).join(" ").slice(0, 300);
     // Point the model at the EXACT in-progress sequence (its saved state is the
     // source of truth) and tell it to inspect it and continue from the end.

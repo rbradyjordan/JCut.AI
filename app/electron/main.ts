@@ -347,7 +347,7 @@ ipcMain.handle("lmstudio-test", async (_e, url: string) => {
 });
 
 // ── Agent run (backend-aware) with streaming + interrupt ─────────────────────
-ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string) => {
+ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string, steering?: boolean) => {
   const s = loadSettings();
   const useLocal = s.backend === "local";
   // If an editing mode/preset is active, fetch its instructions and prepend them
@@ -381,6 +381,7 @@ ipcMain.handle("agent-run", async (e, prompt: string, chatId?: string) => {
   const agentArgs = [entry, fullPrompt, "--workspace", s.workspace];
   if (!useLocal && s.claudeModel) agentArgs.push("--model", s.claudeModel);
   if (chatId) agentArgs.push("--chat-id", chatId);
+  if (steering) agentArgs.push("--steering");
   return new Promise((resolve) => {
     const winId = BrowserWindow.fromWebContents(e.sender)?.id ?? -1;
     // STEERING: if a run is already in flight for this window, kill it before
@@ -551,6 +552,23 @@ ipcMain.handle("pick-media", async (e) => {
     title: "Add footage",
     filters: [
       { name: "Media", extensions: ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "aac", "m4a", "png", "jpg", "jpeg"] },
+    ],
+    properties: ["openFile", "multiSelections"],
+  });
+  if (res.canceled || !res.filePaths.length) return { ok: false };
+  return { ok: true, paths: res.filePaths };
+});
+
+// Open-file dialog for adding reference documents — scripts, briefs, shot lists,
+// treatments. The agent reads these for intent so its first draft is more
+// complete. Binary types (pdf/doc/docx/rtf) get a plain-text sidecar extracted on
+// import; markdown/text are read as-is.
+ipcMain.handle("pick-document", async (e) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  const res = await dialog.showOpenDialog(w!, {
+    title: "Add a document (script, brief, shot list)",
+    filters: [
+      { name: "Documents", extensions: ["md", "markdown", "txt", "rtf", "doc", "docx", "pdf"] },
     ],
     properties: ["openFile", "multiSelections"],
   });

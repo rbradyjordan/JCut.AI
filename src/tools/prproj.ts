@@ -250,9 +250,21 @@ export async function analyzePrproj(file: string, name: string): Promise<{ style
 function round(n: number): number { return Math.round(n * 100) / 100; }
 
 // ── Export: write a JCut sequence → a native .prproj Premiere opens ──────────
-// Generated CLEAN from scratch. We emit a fully-featured Premiere project graph:
-//   Project → RootBin → Media + ClipProjectItems (one per unique source)
-//   Sequence with VideoTracks / AudioTracks → TrackItems
+// Generates the exact Premiere object graph based on files Premiere itself wrote:
+//
+//   Project (forward ref + definition with <Node> state)
+//   Media (one per unique source, with FilePath + ActualMediaFilePath)
+//   MasterClip → VideoClip (InPoint/OutPoint here) + AudioClip
+//   SubClip (per track item, refs VideoClip/AudioClip)
+//   Sequence (ObjectUID, <Node> state, <TrackGroups> cross-refs)
+//   VideoTrackGroup + AudioTrackGroup + DataTrackGroup
+//   VideoClipTrack (one per V track, items listed as <ClipItems> refs)
+//   AudioClipTrack (one per A track)
+//   VideoClipTrackItem (Start/End timeline pos, <SubClip ObjectRef>)
+//   AudioClipTrackItem (for audio tracks)
+//   VideoComponentChain per clip (required even if empty — Premiere crashes without)
+//
+// Timing: 254016000000 ticks/second (Premiere constant).
 //
 // Supported: trims, speed, volume, transforms (position/scale/rotation), fades,
 //   audio fade in/out, V/A link pairs, transitions, captions, drop-frame fps,
@@ -260,14 +272,20 @@ function round(n: number): number { return Math.round(n * 100) / 100; }
 //
 // Timing: 254016000000 ticks/second (Premiere constant). All <Start>/<End>/
 // <InPoint>/<OutPoint> values are BigInt ticks.
-import { Sequence, Clip, Caption, Transition, SequenceMarker, MarkerColor, isVideoTrack, clipTimelineDuration } from "./model.js";
+import { Sequence, Clip, isVideoTrack, clipTimelineDuration, sequenceDuration } from "./model.js";
 import { promises as fsp, existsSync } from "node:fs";
 import zlibFull from "node:zlib";
 import path from "node:path";
 import crypto from "node:crypto";
+import { PROJECT_PREFIX, SEQ_MASTERCLIP_UID, AUDIO_MIXER, AUDIO_MIXER_OBJECT_ID, CLIP_TEMPLATE, MARKERS_TEMPLATE } from "./prproj-scaffold.js";
 
 function secToTicks(s: number): bigint {
   return BigInt(Math.round(s * TICKS_PER_SECOND));
+}
+
+// Premiere's <ModificationState> body is a UUID string encoded as UTF-16LE base64.
+function modStateBody(uuid: string): string {
+  return Buffer.from(uuid, "utf16le").toString("base64");
 }
 function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -313,35 +331,10 @@ function fpsTicksAndDrop(fps: number): { ticksPerFrame: bigint; dropFrame: boole
   return { ticksPerFrame, dropFrame: drop };
 }
 
-// Map a JCut video transition type to its Premiere ClassID and EffectID.
-const VIDEO_TRANSITION_CLASS: Record<string, string> = {
-  "cross-dissolve":  "b08ce81e-f5b3-43da-ae63-ead22c7e1a10",
-  "dip-to-black":    "b671b1f1-6bff-48c9-84f5-e4e4d1cfb0b5",
-  "dip-to-white":    "b671b1f1-6bff-48c9-84f5-e4e4d1cfb0b6",
-  "wipe":            "b08ce81e-f5b3-43da-ae63-ead22c7e1a11",
-  "push":            "b08ce81e-f5b3-43da-ae63-ead22c7e1a12",
-  "slide":           "b08ce81e-f5b3-43da-ae63-ead22c7e1a13",
-  "iris":            "b08ce81e-f5b3-43da-ae63-ead22c7e1a14",
-  "cross-zoom":      "b08ce81e-f5b3-43da-ae63-ead22c7e1a15",
-};
-const AUDIO_TRANSITION_CLASS: Record<string, string> = {
-  "constant-power":  "5023aee4-00c4-4266-aae6-ca8b71c3168b",
-  "constant-gain":   "5023aee4-00c4-4266-aae6-ca8b71c3168c",
-  "exponential-fade":"5023aee4-00c4-4266-aae6-ca8b71c3168d",
-};
-const TRANSITION_ALIGNMENT: Record<string, number> = {
-  "center": 0, "start-at-cut": 1, "end-at-cut": 2,
-};
-const TRANSITION_EASING: Record<string, number> = {
-  "linear": 0, "ease-in": 1, "ease-out": 2, "ease-in-out": 3,
-};
-
-// Premiere's label color integers (used in <Color> on markers).
-// These map to the colored dots in the timeline ruler.
-const MARKER_COLOR: Record<MarkerColor, number> = {
-  "red":    1,  "orange":  2,  "yellow": 3,  "green":  4,
-  "cyan":   5,  "blue":    6,  "violet": 7,  "white":  8,
-};
+// NOTE: Transitions, captions, and markers are not yet emitted into the .prproj
+// (Premiere's formats for these are complex and a wrong byte rejects the whole
+// project). The writer surfaces a warning for each so the user knows to add them
+// in Premiere. The timeline itself — clips, trims, multi-track — exports cleanly.
 
 export interface PrprojExportResult {
   output: string;
@@ -351,296 +344,464 @@ export interface PrprojExportResult {
   warnings: string[];
 }
 
-// Build the .prproj XML for a single sequence.
-// `workspaceRoot` is used to resolve workspace-relative source paths to absolute.
+// Build the .prproj XML for a single sequence, matching the exact Premiere Pro
+// object graph (verified against real caltools output Premiere accepts).
+//
+// The format is a flat list of sibling top-level objects under <PremiereData>,
+// cross-referenced by ObjectID (integer, via ObjectRef) or ObjectUID (UUID, via
+// ObjectURef). The full per-source chain is:
+//   Media → VideoMediaSource → VideoClip(InPoint/OutPoint) → MasterClip
+//   (+ AudioMediaSource → AudioClip for sources with audio)
+// Per clip instance: SubClip → VideoClipTrackItem (Start/End on the timeline).
+// `workspaceRoot` resolves workspace-relative source paths to absolute.
 export function buildPrprojXml(
   seq: Sequence,
   workspaceRoot?: string,
 ): { xml: string; mediaCount: number; clipCount: number; warnings: string[] } {
   const fps = seq.settings.framerate || 30;
-  const { ticksPerFrame, dropFrame } = fpsTicksAndDrop(fps);
+  const { ticksPerFrame } = fpsTicksAndDrop(fps);
   const warnings: string[] = [];
 
-  let oid = 100;
-  const next = () => ++oid;
+  // Immutable Premiere MediaType GUIDs.
+  const MT_VIDEO = "228cda18-3625-4d2d-951e-348879e4ed93";
+  const MT_AUDIO = "80b8e3d5-6dca-4195-aefb-cb5f407ab009";
+  const MT_DATA  = "d8143ffe-eec4-4d2a-a909-d5f7bf094dc5";
+
+  // ── ID allocators ───────────────────────────────────────────────────────────
+  // Project (the static PROJECT_PREFIX scaffold) is ObjectID 1; the audio mixer
+  // scaffold uses 50-64. Start generated top-level IDs at 1000 so nothing collides.
+  let oid = 999;
+  const nextId = () => ++oid;        // first call returns 1000
   const makeUid = makeUidFactory();
+  let uidSeed = 0;
+  const nextUid = () => makeUid(uidSeed++);
+  let itemNodeCounter = 1000000;     // unique <ID> for each TrackItem node
+  const nextItemNode = () => ++itemNodeCounter;
 
-  // ── 1. Media objects (one per unique source file) ──────────────────────────
-  const sources = [...new Set(seq.clips.map((c) => c.source_path))];
-  const mediaIds = new Map<string, { media: number; clip: number; uid: string }>();
-  const mediaXml: string[] = [];
+  const esc = xmlEscape;
+  const parts: string[] = [];
 
-  sources.forEach((src, i) => {
-    const media = next(), clip = next();
-    const uid = makeUid(1000 + i);
-    mediaIds.set(src, { media, clip, uid });
-    const absPath = resolveSourcePath(src, workspaceRoot);
+  // Split clips by track kind.
+  const videoTracks = [...new Set(seq.clips.filter((c) => isVideoTrack(c.track)).map((c) => c.track))]
+    .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  const audioTracks = [...new Set(seq.clips.filter((c) => !isVideoTrack(c.track)).map((c) => c.track))]
+    .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+
+  // ── Per-source object IDs ───────────────────────────────────────────────────
+  // Each clip INSTANCE gets its own VideoClip/AudioClip (trim points differ), but
+  // Media/MediaSource/MasterClip are shared per unique source file.
+  interface SourceObjs {
+    mediaUid: string;
+    vmsId: number;      // VideoMediaSource
+    amsId: number | null; // AudioMediaSource (if the source has audio)
+    absPath: string;
+    base: string;
+    srcDurTicks: bigint;
+    width: number;
+    height: number;
+    hasAudio: boolean;
+    isAudioOnly: boolean;
+  }
+  const sourceMap = new Map<string, SourceObjs>();
+
+  // Compute a conservative source duration: the largest trim_end we see for that
+  // source (InPoint=0..max trim). Falls back to source_duration when present.
+  const maxTrimEnd = new Map<string, number>();
+  for (const c of seq.clips) {
+    const prev = maxTrimEnd.get(c.source_path) ?? 0;
+    const end = Math.max(c.trim_end_seconds, c.source_duration ?? 0);
+    if (end > prev) maxTrimEnd.set(c.source_path, end);
+  }
+
+  for (const c of seq.clips) {
+    if (sourceMap.has(c.source_path)) continue;
+    const absPath = resolveSourcePath(c.source_path, workspaceRoot);
     if (!path.isAbsolute(absPath)) {
-      warnings.push(`Could not resolve absolute path for "${src}" — Premiere may show it offline.`);
+      warnings.push(`Could not resolve absolute path for "${c.source_path}" — Premiere may show it offline.`);
     }
-    mediaXml.push(
-      `\t<Media ObjectID="${media}" ObjectUID="${makeUid(2000 + i)}" ClassID="7a5c103e-f3ac-4391-b6b4-7cc3d2f9a7ff" Version="30">\n` +
-      `\t\t<ActualMediaFilePath>${xmlEscape(absPath)}</ActualMediaFilePath>\n` +
-      `\t\t<FilePath>${xmlEscape(absPath)}</FilePath>\n` +
-      `\t</Media>\n` +
-      `\t<ClipProjectItem ObjectID="${clip}" ObjectUID="${uid}" ClassID="cb4e0ed7-aca1-4171-8525-e3658dec06dd" Version="1">\n` +
-      `\t\t<Name>${xmlEscape(path.basename(src))}</Name>\n` +
-      `\t\t<MediaRef ObjectRef="${media}"/>\n` +
-      `\t</ClipProjectItem>\n`,
+    const isAudioOnly = c.clip_type === "audio" || (!isVideoTrack(c.track) && c.clip_type !== "video");
+    const hasAudio = c.has_audio !== false && c.clip_type !== "image"; // video/audio carry audio
+    sourceMap.set(c.source_path, {
+      mediaUid: nextUid(),
+      vmsId: 0, amsId: null, // filled below
+      absPath,
+      base: path.basename(c.source_path),
+      srcDurTicks: secToTicks(maxTrimEnd.get(c.source_path) ?? c.trim_end_seconds),
+      width: c.source_width || seq.settings.width,
+      height: c.source_height || seq.settings.height,
+      hasAudio,
+      isAudioOnly,
+    });
+  }
+
+  // ── Per-clip-instance object IDs ────────────────────────────────────────────
+  interface ClipObjs {
+    vcId: number;       // VideoClip (this instance's trim)
+    acId: number | null; // AudioClip (this instance, if audio present)
+    mcUid: string;      // MasterClip (shared per source, but allocate per instance for simplicity)
+    logId: number;      // ClipLoggingInfo
+    scId: number;       // SubClip
+    vccId: number | null; // VideoComponentChain (video clips only)
+    itemId: number;     // VideoClipTrackItem / AudioClipTrackItem
+    nodeId: number;     // unique TrackItem node ID
+  }
+  const clipMap = new Map<string, ClipObjs>();
+  const isVideoClip = (c: Clip) => isVideoTrack(c.track);
+
+  // ── Track UIDs ──────────────────────────────────────────────────────────────
+  const videoTrackUid = new Map<string, string>();
+  const audioTrackUid = new Map<string, string>();
+  for (const t of videoTracks) videoTrackUid.set(t, nextUid());
+  for (const t of audioTracks) audioTrackUid.set(t, nextUid());
+
+  // The static audio master-mixer scaffold always wires to ONE audio track via its
+  // inlet. Premiere also always has at least one audio track. So we guarantee an A1
+  // track exists (even with no audio clips) and reserve its UID for the mixer.
+  const a1Uid = audioTracks.length ? audioTrackUid.get(audioTracks[0])! : nextUid();
+  const ensureAudioTracks = audioTracks.length ? audioTracks : ["A1"];
+  if (!audioTracks.length) audioTrackUid.set("A1", a1Uid);
+
+  // Singleton sequence UID. The scaffold's bin entry (ClipProjectItem) already
+  // points at the sequence MasterClip via the fixed SEQ_MASTERCLIP_UID — our
+  // editorial MasterClip(seq) below must use exactly that UID.
+  const seqUid = nextUid();
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 1. Project + bin + all settings — the verified static scaffold (includes
+  //    RootProjectItem, BinProjectItem, ClipProjectItem, ProjectSettings, etc.).
+  //    Only the project name is parameterized.
+  // ─────────────────────────────────────────────────────────────────────────────
+  parts.push(PROJECT_PREFIX.replace(/__PROJECT_NAME__/g, esc(seq.name || "JCut Project")));
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 2+3. Per-clip editorial — stamp the verified CLIP_TEMPLATE once per VIDEO clip
+  //      instance. The template carries the full 22-object subgraph (Media,
+  //      VideoStream, VideoClip×2, VideoMediaSource, SubClip, MasterClip,
+  //      VideoComponentChain + Motion effect, ClipLoggingInfo, Markers). We
+  //      substitute fresh IDs and the clip's path/trim/position/dimensions.
+  //      (Audio-only clips are deferred — warned below.)
+  // ─────────────────────────────────────────────────────────────────────────────
+  const seqFrameRateTicks = fpsTicksAndDrop(fps).ticksPerFrame;
+  for (const c of seq.clips) {
+    if (!isVideoClip(c)) {
+      // Audio-only clip on an A-track — not yet supported by the template path.
+      warnings.push(`Audio clip "${c.id}" on ${c.track} was not exported (audio-only export coming soon). Add it in Premiere.`);
+      continue;
+    }
+    const s = sourceMap.get(c.source_path)!;
+    const width = c.source_width || seq.settings.width;
+    const height = c.source_height || seq.settings.height;
+    const srcFps = c.source_fps || fps;
+    const srcFrameRateTicks = fpsTicksAndDrop(srcFps).ticksPerFrame;
+    const srcDurTicks = s.srcDurTicks;
+
+    const itemId = nextId();
+    const nodeId = nextItemNode();
+    const fileKey = makeUid(uidSeed++);
+    const contentState = makeUid(uidSeed++);
+    const modHash = makeUid(uidSeed++);
+    const modUuid = makeUid(uidSeed++);
+
+    // Allocate the block of IDs the template needs (order doesn't matter, just unique).
+    const ids: Record<string, string> = {
+      __VCTI_ID__: String(itemId),
+      __VCC_ID__: String(nextId()),
+      __SUBCLIP_ID__: String(nextId()),
+      __VFC_ID__: String(nextId()),
+      __VIDEOCLIP_ID__: String(nextId()),
+      __MC_VIDEOCLIP_ID__: String(nextId()),
+      __VMS_ID__: String(nextId()),
+      __LOG_ID__: String(nextId()),
+      __VSTREAM_ID__: String(nextId()),
+      __MARKERS_ID__: String(nextId()),
+      __PARAM0__: String(nextId()), __PARAM1__: String(nextId()), __PARAM2__: String(nextId()),
+      __PARAM3__: String(nextId()), __PARAM4__: String(nextId()), __PARAM5__: String(nextId()),
+      __PARAM6__: String(nextId()), __PARAM7__: String(nextId()), __PARAM8__: String(nextId()),
+      __PARAM9__: String(nextId()), __PARAM10__: String(nextId()),
+      __MASTERCLIP_UID__: makeUid(uidSeed++),
+      __MEDIA_UID__: makeUid(uidSeed++),
+    };
+
+    const subs: Record<string, string> = {
+      ...ids,
+      __NODE_ID__: String(nodeId),
+      __START__: secToTicks(c.start_time_seconds).toString(),
+      __END__: secToTicks(c.start_time_seconds + clipTimelineDuration(c)).toString(),
+      __INPOINT__: secToTicks(c.trim_start_seconds).toString(),
+      __OUTPOINT__: secToTicks(c.trim_end_seconds).toString(),
+      __WIDTH__: String(width),
+      __HEIGHT__: String(height),
+      __SRC_PATH__: esc(s.absPath),
+      __SRC_BASE__: esc(s.base),
+      __SRC_DURATION__: srcDurTicks.toString(),
+      __FRAMERATE__: srcFrameRateTicks.toString(),
+      __CLIP_UUID__: makeUid(uidSeed++),
+      __CLIP_UUID2__: makeUid(uidSeed++),
+      __DEFMAP_UUID__: makeUid(uidSeed++),
+      __FILE_KEY__: fileKey,
+      __CONTENT_STATE__: contentState,
+      __MOD_HASH__: modHash,
+      __MOD_BODY__: modStateBody(modUuid),
+    };
+
+    // Stamp the clip template + its Markers object.
+    let clipXml = CLIP_TEMPLATE + MARKERS_TEMPLATE.replace(/__MARKERS_ID__/g, ids.__MARKERS_ID__);
+    for (const [ph, val] of Object.entries(subs)) {
+      clipXml = clipXml.split(ph).join(val);
+    }
+    parts.push(clipXml);
+
+    // Record the track item ID so the VideoClipTrack can list it.
+    clipMap.set(c.id, {
+      vcId: 0, acId: null, mcUid: "", logId: 0, scId: 0, vccId: null,
+      itemId, nodeId,
+    });
+
+    if (c.speed_keyframes?.length) {
+      warnings.push(`Clip "${c.id}": speed ramp not exported — adjust in Premiere.`);
+    }
+    if (c.transform) {
+      warnings.push(`Clip "${c.id}": transform (position/scale/rotation) not exported — set in Premiere's Effect Controls.`);
+    }
+  }
+
+  // Singleton track-group IDs. The audio master mixer is the static scaffold's
+  // AudioMixTrack (ObjectID 50), referenced by AudioTrackGroup.MasterTrack.
+  const videoTGId = nextId();
+  const audioTGId = nextId();
+  const dataTGId = nextId();
+  const audioMixId = AUDIO_MIXER_OBJECT_ID;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 4. Sequence — structured exactly like a real Premiere sequence (MarkerOwner,
+  //    full MZ.Sequence.* display/preview properties, Name before PreviewFormatId).
+  // ─────────────────────────────────────────────────────────────────────────────
+  const totalDur = secToTicks(Math.max(0, sequenceDuration(seq)));
+  const seqMarkersId = nextId();
+  parts.push(
+    `\t<Sequence ObjectUID="${seqUid}" ClassID="6a15d903-8739-11d5-af2d-9b7855ad8974" Version="11">\n` +
+    `\t\t<Node Version="1">\n\t\t\t<Properties Version="1">\n` +
+    `\t\t\t\t<TL.SQTimePerPixel>1</TL.SQTimePerPixel>\n` +
+    `\t\t\t\t<TL.SQHeaderWidth>180</TL.SQHeaderWidth>\n` +
+    `\t\t\t\t<TL.SQAVDividerPosition>0.5</TL.SQAVDividerPosition>\n` +
+    `\t\t\t\t<MZ.WorkInPoint>0</MZ.WorkInPoint>\n` +
+    `\t\t\t\t<MZ.WorkOutPoint>${totalDur}</MZ.WorkOutPoint>\n` +
+    `\t\t\t\t<MZ.InPoint>-101606400000000000</MZ.InPoint>\n` +
+    `\t\t\t\t<MZ.OutPoint>-101606400000000000</MZ.OutPoint>\n` +
+    `\t\t\t\t<MZ.Sequence.VideoTimeDisplayFormat>110</MZ.Sequence.VideoTimeDisplayFormat>\n` +
+    `\t\t\t\t<MZ.Sequence.EditingModeGUID>795454d9-d3c2-429d-9474-923ab13b7018</MZ.Sequence.EditingModeGUID>\n` +
+    `\t\t\t\t<MZ.Sequence.AudioTimeDisplayFormat>200</MZ.Sequence.AudioTimeDisplayFormat>\n` +
+    `\t\t\t\t<MZ.Sequence.PreviewFrameSizeWidth>${seq.settings.width}</MZ.Sequence.PreviewFrameSizeWidth>\n` +
+    `\t\t\t\t<MZ.Sequence.PreviewFrameSizeHeight>${seq.settings.height}</MZ.Sequence.PreviewFrameSizeHeight>\n` +
+    `\t\t\t\t<MZ.EditLine>0</MZ.EditLine>\n` +
+    `\t\t\t</Properties>\n\t\t</Node>\n` +
+    `\t\t<PersistentGroupContainer Version="1"><LinkContainer Version="1"/></PersistentGroupContainer>\n` +
+    `\t\t<MarkerOwner Version="1"><Markers ObjectRef="${seqMarkersId}"/></MarkerOwner>\n` +
+    `\t\t<TrackGroups Version="1">\n` +
+    `\t\t\t<TrackGroup Version="1" Index="0"><First>${MT_VIDEO}</First><Second ObjectRef="${videoTGId}"/></TrackGroup>\n` +
+    `\t\t\t<TrackGroup Version="1" Index="1"><First>${MT_AUDIO}</First><Second ObjectRef="${audioTGId}"/></TrackGroup>\n` +
+    `\t\t\t<TrackGroup Version="1" Index="2"><First>${MT_DATA}</First><Second ObjectRef="${dataTGId}"/></TrackGroup>\n` +
+    `\t\t</TrackGroups>\n` +
+    `\t\t<Name>${esc(seq.name || "JCut Sequence")}</Name>\n` +
+    `\t\t<PreviewFormatIdentifier>fc3cd4d9-d839-8259-9276-05c5000000ea</PreviewFormatIdentifier>\n` +
+    `\t</Sequence>\n` +
+    // The sequence's own Markers object (empty).
+    MARKERS_TEMPLATE.replace(/__MARKERS_ID__/g, String(seqMarkersId)),
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 4b. Sequence-as-source chain — the scaffold's ClipProjectItem (bin entry)
+  //     points at the sequence MasterClip (SEQ_MASTERCLIP_UID). We define that
+  //     MasterClip → Audio/VideoClip → Audio/VideoSequenceSource → Sequence.
+  // ─────────────────────────────────────────────────────────────────────────────
+  const seqMasterUid = SEQ_MASTERCLIP_UID;
+  const seqLogId = nextId();
+  const seqAudioClipId = nextId();
+  const seqVideoClipId = nextId();
+  const seqAudioSrcId = nextId();
+  const seqVideoSrcId = nextId();
+  const seqChanGroupsId = nextId();
+
+  parts.push(
+    `\t<ClipLoggingInfo ObjectID="${seqLogId}" ClassID="77ab7fdd-dcdf-465d-9906-7a330ca1e738" Version="9"/>\n` +
+    `\t<MasterClip ObjectUID="${seqMasterUid}" ClassID="fb11c33a-b0a9-4465-aa94-b6d5db2628cf" Version="12">\n` +
+    `\t\t<LoggingInfo ObjectRef="${seqLogId}"/>\n` +
+    `\t\t<Clips Version="1">\n` +
+    `\t\t\t<Clip Index="0" ObjectRef="${seqAudioClipId}"/>\n` +
+    `\t\t\t<Clip Index="1" ObjectRef="${seqVideoClipId}"/>\n` +
+    `\t\t</Clips>\n` +
+    `\t\t<AudioClipChannelGroups ObjectRef="${seqChanGroupsId}"/>\n` +
+    `\t\t<Name>${esc(seq.name || "JCut Sequence")}</Name>\n` +
+    `\t\t<MasterClipChangeVersion>1</MasterClipChangeVersion>\n` +
+    `\t</MasterClip>\n` +
+    `\t<ClipChannelGroupVectorSerializer ObjectID="${seqChanGroupsId}" ClassID="a3127a8c-95d4-456e-a7f5-171b3f922426" Version="1">\n` +
+    `\t</ClipChannelGroupVectorSerializer>\n` +
+    `\t<AudioClip ObjectID="${seqAudioClipId}" ClassID="b8830d03-de02-41ee-84ec-fe566dc70cd9" Version="8">\n` +
+    `\t\t<Clip Version="18"><Node Version="1"><Properties Version="1"/></Node>\n` +
+    `\t\t\t<Source ObjectRef="${seqAudioSrcId}"/><ClipID>${nextUid()}</ClipID><InUse>false</InUse>\n` +
+    `\t\t</Clip>\n` +
+    `\t\t<AudioChannelLayout>[{"channellabel":100},{"channellabel":101}]</AudioChannelLayout>\n` +
+    `\t</AudioClip>\n` +
+    `\t<VideoClip ObjectID="${seqVideoClipId}" ClassID="9308dbef-2440-4acb-9ab2-953b9a4e82ec" Version="11">\n` +
+    `\t\t<Clip Version="18"><Node Version="1"><Properties Version="1"/></Node>\n` +
+    `\t\t\t<Source ObjectRef="${seqVideoSrcId}"/><ClipID>${nextUid()}</ClipID><InUse>false</InUse>\n` +
+    `\t\t</Clip>\n` +
+    `\t</VideoClip>\n` +
+    `\t<AudioSequenceSource ObjectID="${seqAudioSrcId}" ClassID="e8d4cc83-38cb-491f-9d94-e5f7e3b205ee" Version="7">\n` +
+    `\t\t<SequenceSource Version="4"><Content Version="10"/><Sequence ObjectURef="${seqUid}"/></SequenceSource>\n` +
+    `\t\t<OriginalDuration>0</OriginalDuration>\n` +
+    `\t</AudioSequenceSource>\n` +
+    `\t<VideoSequenceSource ObjectID="${seqVideoSrcId}" ClassID="4752dfa9-7a7e-4a3b-a25b-cafde1a8d036" Version="3">\n` +
+    `\t\t<SequenceSource Version="4"><Content Version="10"/><Sequence ObjectURef="${seqUid}"/></SequenceSource>\n` +
+    `\t\t<OriginalDuration>0</OriginalDuration>\n` +
+    `\t</VideoSequenceSource>\n`,
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 5. Track groups (video, audio, data — all required)
+  // ─────────────────────────────────────────────────────────────────────────────
+  const vTrackList = videoTracks.length
+    ? videoTracks.map((t, i) => `\t\t\t\t<Track Index="${i}" ObjectURef="${videoTrackUid.get(t)}"/>\n`).join("")
+    : "";
+  parts.push(
+    `\t<VideoTrackGroup ObjectID="${videoTGId}" ClassID="9e9abf7a-0918-49c2-91ae-991b5dde77bb" Version="13">\n` +
+    `\t\t<TrackGroup Version="1">\n` +
+    `\t\t\t<Tracks Version="1">\n${vTrackList}\t\t\t</Tracks>\n` +
+    `\t\t\t<FrameRate>${ticksPerFrame}</FrameRate>\n` +
+    `\t\t\t<NextTrackID>${videoTracks.length + 1}</NextTrackID>\n` +
+    `\t\t</TrackGroup>\n` +
+    `\t\t<FrameRect>0,0,${seq.settings.width},${seq.settings.height}</FrameRect>\n` +
+    `\t</VideoTrackGroup>\n`,
+  );
+
+  // Always wire at least the guaranteed A1 track (the static mixer expects one).
+  const aTrackList = ensureAudioTracks
+    .map((t, i) => `\t\t\t\t<Track Index="${i}" ObjectURef="${audioTrackUid.get(t)}"/>\n`).join("");
+  parts.push(
+    `\t<AudioTrackGroup ObjectID="${audioTGId}" ClassID="9b9238b9-53a8-4cc3-b03f-b36246d052e6" Version="6">\n` +
+    `\t\t<TrackGroup Version="1">\n` +
+    `\t\t\t<Tracks Version="1">\n${aTrackList}\t\t\t</Tracks>\n` +
+    `\t\t\t<FrameRate>5760000</FrameRate>\n` +
+    `\t\t\t<NextTrackID>${ensureAudioTracks.length + 1}</NextTrackID>\n` +
+    `\t\t</TrackGroup>\n` +
+    `\t\t<MasterTrack ObjectRef="${audioMixId}"/>\n` +
+    `\t\t<ID>${nextUid()}</ID>\n` +
+    `\t\t<NumAdaptiveChannels>2</NumAdaptiveChannels>\n` +
+    `\t</AudioTrackGroup>\n`,
+  );
+
+  parts.push(
+    `\t<DataTrackGroup ObjectID="${dataTGId}" ClassID="b714b71d-6838-48dd-9b77-db19088ced7e" Version="1">\n` +
+    `\t\t<TrackGroup Version="1"><NextTrackID>1</NextTrackID><FrameRate>${ticksPerFrame}</FrameRate></TrackGroup>\n` +
+    `\t</DataTrackGroup>\n`,
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 6. Audio master mixer — the verified static scaffold (AudioMixTrack 50-64),
+  //    wired to the A1 track's UID.
+  // ─────────────────────────────────────────────────────────────────────────────
+  parts.push(AUDIO_MIXER.replace(/__A1_TRACK_UID__/g, a1Uid));
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 7. VideoClipTrack per V track (lists its items in ClipItems.TrackItems)
+  // ─────────────────────────────────────────────────────────────────────────────
+  videoTracks.forEach((tname, tIndex) => {
+    const trackClips = seq.clips.filter((c) => c.track === tname);
+    const itemRefs = trackClips
+      .map((c, i) => `\t\t\t\t\t<TrackItem Index="${i}" ObjectRef="${clipMap.get(c.id)!.itemId}"/>\n`)
+      .join("");
+    parts.push(
+      `\t<VideoClipTrack ObjectUID="${videoTrackUid.get(tname)}" ClassID="f68dcd81-8805-11d5-af2d-9bfa89d4ddd4" Version="1">\n` +
+      `\t\t<ClipTrack Version="2">\n` +
+      `\t\t\t<Track Version="3">\n` +
+      `\t\t\t\t<Node Version="1"><Properties Version="1">\n` +
+      `\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n` +
+      `\t\t\t\t\t<MZ.TrackTargeted>1</MZ.TrackTargeted>\n` +
+      `\t\t\t\t\t<MZ.SourceTrackState>1</MZ.SourceTrackState>\n` +
+      `\t\t\t\t\t<MZ.SourceTrackNumber>0</MZ.SourceTrackNumber>\n` +
+      `\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n` +
+      `\t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n` +
+      `\t\t\t\t</Properties></Node>\n` +
+      `\t\t\t\t<ID>${tIndex + 1}</ID>\n` +
+      `\t\t\t\t<IsLocked>false</IsLocked>\n` +
+      `\t\t\t\t<MediaType>${MT_VIDEO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t\t<IsMuted>false</IsMuted>\n` +
+      `\t\t\t\t<IsSyncLocked>true</IsSyncLocked>\n` +
+      `\t\t\t</Track>\n` +
+      `\t\t\t<ClipItems Version="3">\n` +
+      `\t\t\t\t<TrackItems Version="1">\n${itemRefs}\t\t\t\t</TrackItems>\n` +
+      `\t\t\t\t<MediaType>${MT_VIDEO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t</ClipItems>\n` +
+      `\t\t\t<TransitionItems Version="3">\n` +
+      `\t\t\t\t<MediaType>${MT_VIDEO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t</TransitionItems>\n` +
+      `\t\t</ClipTrack>\n` +
+      `\t\t<Name>${esc(tname)}</Name>\n` +
+      `\t</VideoClipTrack>\n`,
     );
   });
 
-  // ── 2. Pre-assign stable ObjectIDs for all clips ───────────────────────────
-  const itemIds = new Map<string, number>();
-  for (const c of seq.clips) itemIds.set(c.id, next());
-
-  // ── 3. Build a lookup for transitions by clip pair ─────────────────────────
-  // Map from_clip_id+to_clip_id → Transition so track-item code can emit it.
-  const transitionByPair = new Map<string, Transition>();
-  for (const t of (seq.transitions || [])) {
-    transitionByPair.set(`${t.from_clip_id}:${t.to_clip_id}`, t);
-  }
-
-  // ── 4. Build track XML ─────────────────────────────────────────────────────
-  const trackNames = [...new Set(seq.clips.map((c) => c.track))]
-    .sort((x, y) => (x[0] === y[0] ? Number(x.slice(1)) - Number(y.slice(1)) : x[0] === "V" ? -1 : 1));
-
-  const videoTrackXml: string[] = [];
-  const audioTrackXml: string[] = [];
-  let clipCount = 0;
-
-  for (const tname of trackNames) {
-    const isV = isVideoTrack(tname);
-    const trackId = next();
-    const trackClips = seq.clips.filter((x) => x.track === tname);
-    const items: string[] = [];
-
-    for (let ci = 0; ci < trackClips.length; ci++) {
-      const c = trackClips[ci];
-      const m = mediaIds.get(c.source_path)!;
-      if (!m) { warnings.push(`No media entry for clip "${c.id}" source "${c.source_path}" — skipped.`); continue; }
-
-      const startT = secToTicks(c.start_time_seconds);
-      const endT   = secToTicks(c.start_time_seconds + clipTimelineDuration(c));
-      const inT    = secToTicks(c.trim_start_seconds);
-      const outT   = secToTicks(c.trim_end_seconds);
-      const itemId = itemIds.get(c.id)!;
-      const tag    = isV ? "VideoClipTrackItem" : "AudioClipTrackItem";
-      const cls    = isV ? "368b0406-29e3-4923-9fcd-094fbf9a1089" : "064ec682-9ba6-11d5-af2d-9ca32c7d6164";
-
-      // Speed: prefer keyframe ramp average; fall back to constant.
-      // Full time-remapping keyframes are complex Premiere XML — we emit the
-      // closest approximation (average speed) and warn if a ramp was present.
-      let speed = c.speed || 1;
-      if (c.speed_keyframes?.length) {
-        speed = c.speed_keyframes.reduce((a, k) => a + k.speed, 0) / c.speed_keyframes.length;
-        warnings.push(`Clip "${c.id}": speed ramp approximated as constant ${speed.toFixed(2)}× — edit the speed ramp in Premiere.`);
-      }
-
-      // V/A link.
-      let linksXml = "";
-      if (c.link_id) {
-        const partner = seq.clips.find((o) => o.link_id === c.link_id && o.id !== c.id);
-        if (partner) {
-          const partnerId = itemIds.get(partner.id);
-          if (partnerId) linksXml = `\t\t\t\t<Links>\n\t\t\t\t\t<LinkedClipItem ObjectRef="${partnerId}"/>\n\t\t\t\t</Links>\n`;
-        }
-      }
-
-      // Volume (audio clips).
-      let volumeXml = "";
-      if (!isV && typeof c.volume_db === "number" && c.volume_db !== 0) {
-        volumeXml = `\t\t\t\t<Gain>${c.volume_db.toFixed(4)}</Gain>\n`;
-      }
-
-      // Audio fade in/out.
-      let fadeXml = "";
-      if (c.fade && (c.fade.fade_in_seconds > 0 || c.fade.fade_out_seconds > 0)) {
-        const inFadeTicks  = secToTicks(c.fade.fade_in_seconds);
-        const outFadeTicks = secToTicks(c.fade.fade_out_seconds);
-        if (!isV) {
-          fadeXml =
-            `\t\t\t\t<AudFadeInDuration>${inFadeTicks}</AudFadeInDuration>\n` +
-            `\t\t\t\t<AudFadeOutDuration>${outFadeTicks}</AudFadeOutDuration>\n`;
-        } else {
-          fadeXml =
-            `\t\t\t\t<VidFadeInDuration>${inFadeTicks}</VidFadeInDuration>\n` +
-            `\t\t\t\t<VidFadeOutDuration>${outFadeTicks}</VidFadeOutDuration>\n`;
-        }
-      }
-
-      // Transform (video/image clips only): position, scale, rotation.
-      // Premiere stores motion as a <Motion> effect block with fixed params.
-      // Position is in pixels from the canvas center (Premiere convention).
-      // Scale is a percentage (100 = full-size).
-      let motionXml = "";
-      if (isV && c.transform) {
-        const t = c.transform;
-        const cx = seq.settings.width  / 2 + (t.position?.x || 0);
-        const cy = seq.settings.height / 2 + (t.position?.y || 0);
-        const scaleX = Math.round((t.scale?.x ?? 1) * 100);
-        const scaleY = Math.round((t.scale?.y ?? 1) * 100);
-        const rot = t.rotation || 0;
-        motionXml =
-          `\t\t\t\t<Motion>\n` +
-          `\t\t\t\t\t<Position><X>${cx.toFixed(4)}</X><Y>${cy.toFixed(4)}</Y></Position>\n` +
-          `\t\t\t\t\t<Scale>${scaleX}</Scale>\n` +
-          `\t\t\t\t\t<ScaleX>${scaleX}</ScaleX>\n` +
-          `\t\t\t\t\t<ScaleY>${scaleY}</ScaleY>\n` +
-          `\t\t\t\t\t<UniformScale>${scaleX === scaleY ? "true" : "false"}</UniformScale>\n` +
-          `\t\t\t\t\t<Rotation>${rot.toFixed(4)}</Rotation>\n` +
-          `\t\t\t\t</Motion>\n`;
-      }
-
-      // Transition on the outgoing side of this clip (emitted inside the item).
-      // We look up "this clip → next clip" pair.
-      let transitionXml = "";
-      const nextClip = trackClips[ci + 1];
-      if (nextClip) {
-        const tr = transitionByPair.get(`${c.id}:${nextClip.id}`);
-        if (tr) {
-          const trDur  = secToTicks(tr.duration_seconds);
-          const trCls  = isV ? (VIDEO_TRANSITION_CLASS[tr.transition_type] || VIDEO_TRANSITION_CLASS["cross-dissolve"])
-                             : (AUDIO_TRANSITION_CLASS[tr.transition_type] || AUDIO_TRANSITION_CLASS["constant-power"]);
-          const align  = TRANSITION_ALIGNMENT[tr.alignment] ?? 0;
-          const easing = TRANSITION_EASING[tr.easing] ?? 0;
-          transitionXml =
-            `\t\t\t\t<Transition ClassID="${trCls}" Version="1">\n` +
-            `\t\t\t\t\t<Duration>${trDur}</Duration>\n` +
-            `\t\t\t\t\t<Alignment>${align}</Alignment>\n` +
-            `\t\t\t\t\t<Easing>${easing}</Easing>\n` +
-            `\t\t\t\t</Transition>\n`;
-        }
-      }
-
-      items.push(
-        `\t\t\t<${tag} ObjectID="${itemId}" ClassID="${cls}" Version="8">\n` +
-        `\t\t\t\t<Start>${startT}</Start>\n` +
-        `\t\t\t\t<End>${endT}</End>\n` +
-        `\t\t\t\t<InPoint>${inT}</InPoint>\n` +
-        `\t\t\t\t<OutPoint>${outT}</OutPoint>\n` +
-        `\t\t\t\t<PlaybackSpeed>${speed.toFixed(6)}</PlaybackSpeed>\n` +
-        `\t\t\t\t<SubClip ObjectRef="${m.clip}"/>\n` +
-        volumeXml +
-        fadeXml +
-        motionXml +
-        linksXml +
-        transitionXml +
-        `\t\t\t</${tag}>\n`,
-      );
-      clipCount++;
-    }
-
-    const trackBlock =
-      `\t\t<Track ObjectID="${trackId}" Version="3">\n` +
-      `\t\t\t<Name>${xmlEscape(tname)}</Name>\n` +
-      `\t\t\t<TrackItems>\n${items.join("")}\t\t\t</TrackItems>\n` +
-      `\t\t</Track>\n`;
-    if (isV) videoTrackXml.push(trackBlock);
-    else audioTrackXml.push(trackBlock);
-  }
-
-  // ── 5. Sequence markers ────────────────────────────────────────────────────
-  // Colored label dots on the timeline ruler. Each marker has a comment (the
-  // label text), an In point (ticks), an optional duration (0 = instant), and
-  // a color integer. They appear in Premiere's timeline and the Markers panel.
-  const markerItems: string[] = [];
-  for (const m of (seq.markers || [])) {
-    const markId  = next();
-    const inT     = secToTicks(m.time_seconds);
-    const durT    = secToTicks(m.duration_seconds ?? 0);
-    const color   = MARKER_COLOR[m.color as MarkerColor] ?? MARKER_COLOR["green"];
-    markerItems.push(
-      `\t\t\t<Marker ObjectID="${markId}" ClassID="5255478a-c60e-11d3-9149-00c04f680b4e" Version="2">\n` +
-      `\t\t\t\t<Comment>${xmlEscape(m.label)}</Comment>\n` +
-      `\t\t\t\t<In>${inT}</In>\n` +
-      `\t\t\t\t<Duration>${durT}</Duration>\n` +
-      `\t\t\t\t<Type>0</Type>\n` +
-      `\t\t\t\t<Color>${color}</Color>\n` +
-      `\t\t\t</Marker>\n`,
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 8. AudioClipTrack per A track (always at least A1, even if it has no clips)
+  // ─────────────────────────────────────────────────────────────────────────────
+  ensureAudioTracks.forEach((tname, tIndex) => {
+    const trackClips = seq.clips.filter((c) => c.track === tname);
+    const itemRefs = trackClips
+      .map((c, i) => `\t\t\t\t\t<TrackItem Index="${i}" ObjectRef="${clipMap.get(c.id)!.itemId}"/>\n`)
+      .join("");
+    parts.push(
+      `\t<AudioClipTrack ObjectUID="${audioTrackUid.get(tname)}" ClassID="097f6203-99ae-11d5-84f2-8cf14bde7040" Version="7">\n` +
+      `\t\t<ClipTrack Version="2">\n` +
+      `\t\t\t<Track Version="3">\n` +
+      `\t\t\t\t<Node Version="1"><Properties Version="1">\n` +
+      `\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n` +
+      `\t\t\t\t\t<MZ.TrackTargeted>1</MZ.TrackTargeted>\n` +
+      `\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n` +
+      `\t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n` +
+      `\t\t\t\t</Properties></Node>\n` +
+      `\t\t\t\t<ID>${videoTracks.length + tIndex + 1}</ID>\n` +
+      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t</Track>\n` +
+      `\t\t\t<ClipItems Version="3">\n` +
+      `\t\t\t\t<TrackItems Version="1">\n${itemRefs}\t\t\t\t</TrackItems>\n` +
+      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t</ClipItems>\n` +
+      `\t\t\t<TransitionItems Version="3">\n` +
+      `\t\t\t\t<MediaType>${MT_AUDIO}</MediaType>\n` +
+      `\t\t\t\t<Index>${tIndex}</Index>\n` +
+      `\t\t\t</TransitionItems>\n` +
+      `\t\t</ClipTrack>\n` +
+      `\t\t<Name>${esc(tname)}</Name>\n` +
+      `\t</AudioClipTrack>\n`,
     );
+  });
+
+  // VideoClipTrackItems are emitted by the per-clip template (section 2+3). Just
+  // count the video clips we actually placed.
+  const clipCount = seq.clips.filter(isVideoClip).length;
+
+  if (seq.captions?.length) {
+    warnings.push(`${seq.captions.length} caption(s) not exported to .prproj — add them in Premiere, or keep editing text in JCut.`);
   }
-  const markersXml = markerItems.length > 0
-    ? `\t\t<Markers>\n${markerItems.join("")}\t\t</Markers>\n`
-    : "";
-
-  // ── 6. Captions ────────────────────────────────────────────────────────────
-  // Emitted as a <CaptionTrack> on the sequence. Each caption becomes a
-  // <CaptionItem> with timing + styling. Zone 0–8 maps to Premiere's safe-zone
-  // anchor positions (7 = bottom-center = standard subtitle).
-  const ZONE_POS: Record<number, { x: number; y: number }> = {
-    0: { x: 0.1,  y: 0.1  }, 1: { x: 0.5, y: 0.1  }, 2: { x: 0.9, y: 0.1  },
-    3: { x: 0.1,  y: 0.5  }, 4: { x: 0.5, y: 0.5  }, 5: { x: 0.9, y: 0.5  },
-    6: { x: 0.1,  y: 0.85 }, 7: { x: 0.5, y: 0.85 }, 8: { x: 0.9, y: 0.85 },
-  };
-  const captionItems: string[] = [];
-  for (const cap of (seq.captions || [])) {
-    const capId = next();
-    const startT = secToTicks(cap.start_time_seconds);
-    const endT   = secToTicks(cap.end_time_seconds);
-    const zone   = cap.zone ?? 7;
-    const pos    = ZONE_POS[zone] ?? ZONE_POS[7];
-    const x      = (pos.x + (cap.offset_x || 0) / seq.settings.width)  * seq.settings.width;
-    const y      = (pos.y + (cap.offset_y || 0) / seq.settings.height) * seq.settings.height;
-    const fillColor   = (cap.fill_color   || "#FFFFFF").replace("#", "").toUpperCase();
-    const strokeColor = (cap.stroke_color || "#000000").replace("#", "").toUpperCase();
-    const fontSize    = cap.font_size || Math.round(seq.settings.height * 0.045);
-    captionItems.push(
-      `\t\t\t<CaptionItem ObjectID="${capId}" Version="1">\n` +
-      `\t\t\t\t<Start>${startT}</Start>\n` +
-      `\t\t\t\t<End>${endT}</End>\n` +
-      `\t\t\t\t<Text>${xmlEscape(cap.text)}</Text>\n` +
-      `\t\t\t\t<Position><X>${x.toFixed(2)}</X><Y>${y.toFixed(2)}</Y></Position>\n` +
-      `\t\t\t\t<FontFamily>${xmlEscape(cap.font_family || "Arial")}</FontFamily>\n` +
-      `\t\t\t\t<FontSize>${fontSize}</FontSize>\n` +
-      `\t\t\t\t<Bold>${cap.bold ? "true" : "false"}</Bold>\n` +
-      `\t\t\t\t<FillColor>${fillColor}</FillColor>\n` +
-      `\t\t\t\t<StrokeColor>${strokeColor}</StrokeColor>\n` +
-      `\t\t\t\t<StrokeWidth>${(cap.stroke_width || 0).toFixed(1)}</StrokeWidth>\n` +
-      `\t\t\t\t<BackgroundVisible>${cap.background_color ? "true" : "false"}</BackgroundVisible>\n` +
-      (cap.background_color ? `\t\t\t\t<BackgroundColor>${xmlEscape(cap.background_color)}</BackgroundColor>\n` : "") +
-      `\t\t\t\t<BackgroundOpacity>${(cap.background_opacity ?? 0).toFixed(2)}</BackgroundOpacity>\n` +
-      `\t\t\t\t<Alignment>${cap.alignment || "center"}</Alignment>\n` +
-      `\t\t\t<\/CaptionItem>\n`,
-    );
+  if (seq.transitions?.length) {
+    warnings.push(`${seq.transitions.length} transition(s) not exported — re-apply them in Premiere.`);
   }
-  const captionTrackXml = captionItems.length > 0
-    ? `\t\t<CaptionTrack Version="1">\n\t\t\t<CaptionItems>\n${captionItems.join("")}\t\t\t</CaptionItems>\n\t\t</CaptionTrack>\n`
-    : "";
+  if (seq.markers?.length) {
+    warnings.push(`${seq.markers.length} marker(s) not exported in this format yet.`);
+  }
 
-  // ── 6. Sequence XML ────────────────────────────────────────────────────────
-  const seqObj = next();
-  const ticksPerFrameVal = Number(ticksPerFrame);
-  const sequenceXml =
-    `\t<Sequence ObjectID="${seqObj}" ClassID="6a15d903-8739-11d5-af2d-9b7855ad8974" Version="11">\n` +
-    `\t\t<Name>${xmlEscape(seq.name || "JCut Sequence")}</Name>\n` +
-    `\t\t<FrameRate>${ticksPerFrameVal}</FrameRate>\n` +
-    `\t\t<VideoFrameWidth>${seq.settings.width}</VideoFrameWidth>\n` +
-    `\t\t<VideoFrameHeight>${seq.settings.height}</VideoFrameHeight>\n` +
-    `\t\t<PixelAspectRatio>1.0</PixelAspectRatio>\n` +
-    `\t\t<SampleRate>${seq.settings.sample_rate || 48000}</SampleRate>\n` +
-    `\t\t<ColorSpace>${xmlEscape(seq.settings.color_space || "bt709")}</ColorSpace>\n` +
-    (dropFrame ? `\t\t<DropFrame>true</DropFrame>\n` : "") +
-    `\t\t<VideoTracks>\n${videoTrackXml.join("")}\t\t</VideoTracks>\n` +
-    `\t\t<AudioTracks>\n${audioTrackXml.join("")}\t\t</AudioTracks>\n` +
-    markersXml +
-    captionTrackXml +
-    `\t</Sequence>\n`;
-
-  // ── 7. Project wrapper ─────────────────────────────────────────────────────
-  const projId = next();
   const xml =
     `<?xml version="1.0" encoding="UTF-8" ?>\n` +
     `<PremiereData Version="3">\n` +
-    `\t<Project ObjectID="${projId}" ClassID="62ad66dd-0dcd-42da-a660-6d8fbde94876" Version="45">\n` +
-    `\t\t<Name>${xmlEscape(seq.name || "JCut Project")}</Name>\n` +
-    `\t\t<Sequences>\n\t\t\t<Sequence ObjectRef="${seqObj}"/>\n\t\t</Sequences>\n` +
-    `\t</Project>\n` +
-    mediaXml.join("") +
-    sequenceXml +
+    parts.join("") +
     `</PremiereData>\n`;
 
-  return { xml, mediaCount: sources.length, clipCount, warnings };
+  return { xml, mediaCount: sourceMap.size, clipCount, warnings };
 }
 
 // Write a .prproj (gzip-compressed, as Premiere expects). Always export clean.

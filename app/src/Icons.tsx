@@ -28,6 +28,7 @@ export {
   IconMoon          as Moon,
   IconSun           as Sun,
   IconFile          as File,
+  IconFileText      as FileText,
   IconShieldLock    as Shield,
   IconWifiOff       as Offline,
   IconCloud         as Cloud,

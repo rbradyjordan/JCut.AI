@@ -259,6 +259,10 @@ export default function App() {
 
   const send = async (text: string) => {
     if (!text.trim()) return;
+    // Steering: true when the user sends WHILE the agent is mid-run. We stop the
+    // current run and start a new one, but we must tell the agent it's a redirect
+    // of in-progress work (otherwise it loses all context and starts over / derails).
+    const steering = busy;
     if (busy) {
       runGenRef.current += 1;
       runCleanupRef.current?.();
@@ -369,7 +373,7 @@ export default function App() {
     });
     runCleanupRef.current = () => { if (hbTimer) clearTimeout(hbTimer); offChunk(); offDone(); };
     bumpHeartbeat(); // start the watchdog now that handlers are wired
-    window.jcut.runAgent(text, chatIdRef.current || undefined).catch(() => { forceFinish("Could not start the editor."); });
+    window.jcut.runAgent(text, chatIdRef.current || undefined, steering).catch(() => { forceFinish("Could not start the editor."); });
   };
 
   const retryFrom = (i: number) => {

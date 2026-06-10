@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { spring, TEAL_GRADIENT } from "./theme";
-import { ArrowDown, ChevronDown, ChevronRight, Close, Film, File, Folder, Image, Music, Plus, Warning, Link, Clapper } from "./Icons";
+import { ArrowDown, ChevronDown, ChevronRight, Close, Film, File, FileText, Folder, Image, Music, Plus, Warning, Link, Clapper } from "./Icons";
 import RelinkModal from "./RelinkModal";
 import ContextMenu from "./ContextMenu";
 
@@ -24,6 +24,7 @@ const TYPE_ICON = {
   video: <Film />,
   audio: <Music />,
   images: <Image />,
+  documents: <FileText />,
 };
 
 export default function Sources({
@@ -70,6 +71,16 @@ export default function Sources({
     if (!picked?.ok || !picked.path) return;
     setBusy(true);
     await window.jcut.jc("source-add", ["--workspace", workspace, "--folder", picked.path]);
+    await refresh(); setBusy(false); onChanged?.();
+  };
+
+  // Attach a reference document (script / brief / shot list). The agent reads it
+  // for intent, so its first draft lands closer to what the user actually wants.
+  const addDocument = async () => {
+    const picked = await window.jcut.pickDocument?.();
+    if (!picked?.ok || !picked.paths?.length) return;
+    setBusy(true);
+    await window.jcut.jc("source-add", ["--workspace", workspace, "--files", ...picked.paths]);
     await refresh(); setBusy(false); onChanged?.();
   };
 
@@ -187,6 +198,17 @@ export default function Sources({
           aria-label="Import folder"
         >
           <Folder className="h-4 w-4" />
+        </motion.button>
+
+        <motion.button
+          whileHover={{ scale: 1.015 }} whileTap={{ scale: 0.98 }}
+          transition={spring.bouncy}
+          onClick={addDocument} disabled={busy}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl depth-chip text-dim transition-colors hover:text-ink disabled:opacity-60"
+          title="Add a script, brief, or shot list — the editor reads it for a more complete first draft"
+          aria-label="Add document"
+        >
+          <FileText className="h-4 w-4" />
         </motion.button>
 
         {!collapsed && sources.length > 0 && (

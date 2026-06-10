@@ -21,17 +21,23 @@ const CLI = path.join(PROJECT_ROOT, "dist", "tools", "cli.js");
 function parseCliArgs(argv: string[]) {
   let workspace = "default";
   let model = "";
+  let chatId = "";
+  let steering = false;
   const promptParts: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace") {
       workspace = argv[++i];
     } else if (argv[i] === "--model") {
       model = argv[++i];
+    } else if (argv[i] === "--chat-id") {
+      chatId = argv[++i];
+    } else if (argv[i] === "--steering") {
+      steering = true;
     } else {
       promptParts.push(argv[i]);
     }
   }
-  return { workspace, model, prompt: promptParts.join(" ").trim() };
+  return { workspace, model, chatId, steering, prompt: promptParts.join(" ").trim() };
 }
 
 // Friendly model aliases → Agent SDK model ids.
@@ -44,7 +50,7 @@ function resolveModel(m: string): string | undefined {
 }
 
 async function main() {
-  const { workspace, model, prompt } = parseCliArgs(process.argv.slice(2));
+  const { workspace, model, steering, prompt } = parseCliArgs(process.argv.slice(2));
   if (!prompt) {
     console.error('Usage: npm run edit -- "your request" [--workspace name] [--model opus|sonnet]');
     process.exit(1);
@@ -64,6 +70,20 @@ async function main() {
       `remaining work from where it left off.\n`
     : ``;
 
+  // STEERING: the user sent this WHILE a previous run was in progress (they stopped
+  // it to redirect). The prior run already built partial state — the new instruction
+  // ADJUSTS that work, it does not replace it. So: inspect what exists, keep the good
+  // parts, and apply the redirect. Don't restart from scratch or re-analyze footage
+  // you've already analyzed.
+  const steeringHint = steering
+    ? `\nIMPORTANT — MID-TASK REDIRECT. You were already working on this project when ` +
+      `the user interrupted to steer you with the request below. A partial edit likely ` +
+      `already exists. FIRST run sequences-list and sequence-inspect to see the current ` +
+      `state. Then apply the user's new instruction as an ADJUSTMENT to that existing ` +
+      `work — keep what's already built unless the request says otherwise, and do NOT ` +
+      `re-run expensive analysis (footage/beat/vision) you've already done this session.\n`
+    : ``;
+
   const isHybrid = process.env.HYBRID_MODE === "true";
   const hybridHint = isHybrid
     ? `\nHYBRID MODE ACTIVE: You are the "Creative Director". Your job is to design the edit, not manually build it.\n` +
@@ -80,6 +100,7 @@ async function main() {
     `- Workspaces live under ~/Documents/JCutAI/ unless JCUT_HOME is set.\n` +
     `- ffmpeg and ffprobe are on PATH.\n` +
     resumeHint +
+    steeringHint +
     hybridHint +
     `\nUser request:\n${prompt}`;
 

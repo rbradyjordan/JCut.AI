@@ -41,12 +41,13 @@ declare global {
     claudeStatus(): Promise<{ ok: boolean; available: boolean; version?: string; bin?: string; note: string }>;
     claudeLoginHelp(): Promise<{ ok: boolean }>;
     lmStudioTest(url: string): Promise<{ ok: boolean; models?: string[]; error?: string; normalizedUrl?: string }>;
-    runAgent(prompt: string, chatId?: string): Promise<{ ok: boolean }>;
+    runAgent(prompt: string, chatId?: string, steering?: boolean): Promise<{ ok: boolean }>;
     stopAgent(): Promise<{ ok: boolean; stopped: boolean }>;
     onAgentChunk(cb: (chunk: string) => void): () => void;
     onUsageUpdate(cb: (info: any) => void): () => void;
     onAgentDone(cb: (code: string) => void): () => void;
     pickMedia(): Promise<{ ok: boolean; paths?: string[] }>;
+    pickDocument(): Promise<{ ok: boolean; paths?: string[] }>;
     pickFolder(): Promise<{ ok: boolean; path?: string }>;
     pickPrproj(): Promise<{ ok: boolean; path?: string }>;
     pickSavePrproj(defaultName?: string): Promise<{ ok: boolean; path?: string }>;

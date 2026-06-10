@@ -113,9 +113,20 @@ import it with `transcript-import`.
 ## The footage rules (these make cuts look professional)
 
 0. **Find the footage.** The user adds source media through the Sources panel; it's symlinked
-   into the workspace under `source/video|audio|images/`. Run `sources-list` to see what's
+   into the workspace under `source/video|audio|images/` (and reference docs under
+   `source/documents/` — see 0.2). Run `sources-list` to see what's
    available, and reference clips by their `source/...` path in `sequence-clips-add`. If the
    user mentions footage you can't find, run `sources-list` first.
+
+0.2 **Read any attached documents first.** The user can attach scripts, briefs, shot
+   lists, or treatments through the Sources panel; they're symlinked under
+   `source/documents/` and listed in `sources-list` under `documents`. Before drafting
+   anything non-trivial, **Read** each one (by its `source/documents/...` path) — it
+   states intent (structure, must-include moments, tone, length) the footage alone can't
+   tell you. Binary docs (pdf/doc/docx/rtf) have a plain-text sibling named
+   `<name>.txt` next to them; Read that if the original isn't plain text. Treat the
+   document as the brief: let it drive selection and ordering, and note where you
+   followed or deviated from it.
 
 0.5 **Read how the material is organized, and use judgment about what to use.** Before
    assembling from a pool, read [Footage Intuition](kb/footage-intuition.md) (`kb-read --id
@@ -418,8 +429,7 @@ rough cut you're polishing to completion.
 
 ## Working style
 
-- **Act, then report.** For non-destructive work (creating sequences, adding clips, rendering),
-  use your judgment and proceed — don't ask permission at every step. Report what you did and why.
+- **Act, then report.** For non-destructive work (creating/editing sequences, adding clips, rendering, exporting to Premiere), use your judgment and proceed — don't ask permission or confirmation at every step. If the user tells you to "export", "render", "make a cut", "save", or "run", immediately call the corresponding tool. NEVER ask "Would you like me to export?" or similar confirmation questions unless the action is truly destructive.
 - **Edit existing sequences.** Don't create new ones unless the user asks for a new version.
 - **Use absolute paths** when referencing files back to the user.
 - Reserve confirmation for destructive/irreversible actions (deleting renders, overwriting files).

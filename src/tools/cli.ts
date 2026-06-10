@@ -69,6 +69,31 @@ function parseArgs(argv: string[]): Record<string, any> {
   return out;
 }
 
+// Extract plain text from a binary document (rtf/doc/docx/pdf) using built-in
+// command-line tools, so the agent can read briefs/scripts that aren't already
+// plain text. Returns the text, or null if no extractor is available for the
+// type. macOS ships `textutil` (rtf/doc/docx); `pdftotext` (poppler) handles PDF
+// when installed. We deliberately avoid bundling a parser library — these cover
+// the common cases and degrade gracefully (caller warns when null).
+async function extractDocText(absPath: string): Promise<string | null> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const ext = path.extname(absPath).toLowerCase();
+  try {
+    if (ext === ".pdf") {
+      // `-` writes extracted text to stdout. Large PDFs are capped by maxBuffer.
+      const { stdout } = await run("pdftotext", ["-layout", absPath, "-"], { maxBuffer: 32 * 1024 * 1024 });
+      return stdout;
+    }
+    // rtf / doc / docx → textutil (built into macOS). `-stdout` streams the text.
+    const { stdout } = await run("textutil", ["-convert", "txt", "-stdout", absPath], { maxBuffer: 32 * 1024 * 1024 });
+    return stdout;
+  } catch {
+    return null; // extractor missing or failed — caller surfaces a warning
+  }
+}
+
 function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
 }
@@ -451,7 +476,11 @@ async function main() {
         // --files <abs paths...> AND/OR --folder <dir> (recursively adds every
         // media file found in the folder). Returns workspace-relative paths.
         const ws = a.workspace || fail("--workspace required");
-        const MEDIA_RE = /\.(mp4|mov|mkv|webm|avi|m4v|mp3|wav|aac|flac|m4a|png|jpg|jpeg|gif|webp|bmp|tiff)$/i;
+        // Media + documents. Documents (scripts, briefs, shot lists, treatments)
+        // give the agent context for a more complete first draft. They live under
+        // source/documents/ and are read as text by the agent (see classify below).
+        const MEDIA_RE = /\.(mp4|mov|mkv|webm|avi|m4v|mp3|wav|aac|flac|m4a|png|jpg|jpeg|gif|webp|bmp|tiff|md|markdown|txt|rtf|doc|docx|pdf)$/i;
+        const DOC_RE = /\.(md|markdown|txt|rtf|doc|docx|pdf)$/i;
         let files: string[] = Array.isArray(a.files) ? [...a.files] : [];
         if (a.folder) {
           // Walk the folder (one level deep + immediate subfolders) for media.
@@ -485,7 +514,8 @@ async function main() {
             if (!stat.isFile()) { errors.push(`${f}: not a file`); continue; }
             const type = base.match(/\.(mp4|mov|mkv|webm|avi|m4v)$/i) ? "video"
               : base.match(/\.(mp3|wav|aac|flac|m4a)$/i) ? "audio"
-              : base.match(/\.(png|jpg|jpeg|gif|webp|bmp|tiff)$/i) ? "images" : "video";
+              : base.match(/\.(png|jpg|jpeg|gif|webp|bmp|tiff)$/i) ? "images"
+              : DOC_RE.test(base) ? "documents" : "video";
             const destDir = path.join(workspaceDir(ws), "source", type);
             await fs.mkdir(destDir, { recursive: true });
             const dest = path.join(destDir, base);
@@ -502,6 +532,20 @@ async function main() {
               continue;
             }
             bytesLinked += stat.size;
+            // Binary documents (rtf/doc/docx/pdf) aren't plain text, so the agent
+            // can't Read them directly. Extract a plain-text sidecar (<name>.txt)
+            // next to the symlink at add time using built-in tools, so a clean
+            // transcript of the brief/script is always available regardless of the
+            // agent's parsing ability. .md/.markdown/.txt are already text — no-op.
+            if (/\.(rtf|doc|docx|pdf)$/i.test(base)) {
+              try {
+                const txt = await extractDocText(path.resolve(f));
+                if (txt != null) await fs.writeFile(dest + ".txt", txt, "utf8");
+                else errors.push(`${base}: linked, but couldn't extract text (no extractor available) — agent may not be able to read it`);
+              } catch (e) {
+                errors.push(`${base}: linked, but text extraction failed (${(e as Error).message})`);
+              }
+            }
             added.push({ name: base, rel: path.join("source", type, base), type });
           } catch (e) {
             errors.push(`${f}: ${(e as Error).message}`);
@@ -604,14 +648,24 @@ async function main() {
         const ws = a.workspace || fail("--workspace required");
         const root = path.join(workspaceDir(ws), "source");
         const out: { name: string; rel: string; type: string; origDir: string | null; origPath: string | null; online: boolean }[] = [];
-        for (const type of ["video", "audio", "images"]) {
+        for (const type of ["video", "audio", "images", "documents"]) {
           const dir = path.join(root, type);
           try {
-            for (const f of await fs.readdir(dir)) {
+            const names = await fs.readdir(dir);
+            // Sidecar set: an extracted-text "<doc>.txt" that sits beside a binary
+            // document symlink of the same stem is an implementation detail — don't
+            // list it as its own source. A standalone user .txt has no such sibling
+            // and is kept. Built up-front so listing order doesn't matter.
+            const sidecars = new Set(
+              names.filter((f) => f.endsWith(".txt") &&
+                names.some((g) => g !== f && g + ".txt" === f)),
+            );
+            for (const f of names) {
               // Skip macOS AppleDouble metadata (._name) and dotfiles — they're not
               // real media; listing them makes the agent pick phantom "clips" that
               // fail to probe (the "._ prefix" confusion).
               if (f.startsWith("._") || f.startsWith(".")) continue;
+              if (sidecars.has(f)) continue;
               const symlinkPath = path.join(dir, f);
               let origPath: string | null = null;
               try { origPath = await fs.readlink(symlinkPath); } catch { /* not a symlink */ }
@@ -644,6 +698,11 @@ async function main() {
           video: byType.video || [],
           audio: byType.audio || [],
           images: byType.images || [],
+          // Scripts / briefs / shot lists the user attached. Read them (with the
+          // Read tool, by their source/documents/... path) before drafting — they
+          // tell you intent the footage alone can't. Binary docs have a sibling
+          // "<name>.txt" extraction next to them; read that if the original won't.
+          documents: byType.documents || [],
         });
         break;
       }
@@ -661,7 +720,7 @@ async function main() {
           const rels = Array.isArray(a.rel) ? a.rel : [a.rel];
           targets.push(...rels.map((r) => path.join(workspaceDir(ws), r)));
         } else {
-          for (const type of ["video", "audio", "images"]) {
+          for (const type of ["video", "audio", "images", "documents"]) {
             const dir = path.join(srcRoot, type);
             try { for (const f of await fs.readdir(dir)) targets.push(path.join(dir, f)); } catch { /* */ }
           }
