@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("jcut", {
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
   pickPrproj: () => ipcRenderer.invoke("pick-prproj"),
   pickSavePrproj: (defaultName) => ipcRenderer.invoke("pick-save-prproj", defaultName),
+  pickRelink: (defaultDir) => ipcRenderer.invoke("pick-relink", defaultDir),
   readImage: (filePath) => ipcRenderer.invoke("read-image", filePath),
   listWorkspaces: () => ipcRenderer.invoke("list-workspaces"),
   reveal: (p) => ipcRenderer.invoke("reveal", p),

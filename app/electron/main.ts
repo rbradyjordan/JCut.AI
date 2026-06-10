@@ -596,6 +596,26 @@ ipcMain.handle("pick-save-prproj", async (e, defaultName?: string) => {
   return { ok: true, path: p };
 });
 
+// Relink picker — opens a Finder file dialog pre-navigated to the directory
+// where the original file was last seen. Returns the chosen path or ok:false.
+// `defaultDir` should be the last-known directory of the offline file so Finder
+// opens in the right place (e.g. the SD card or external drive folder).
+ipcMain.handle("pick-relink", async (e, defaultDir?: string) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  const res = await dialog.showOpenDialog(w!, {
+    title: "Locate file",
+    message: "Find the new location of this clip",
+    defaultPath: defaultDir || undefined,
+    filters: [
+      { name: "Media", extensions: ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "aac", "m4a", "flac", "png", "jpg", "jpeg"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+    properties: ["openFile"],
+  });
+  if (res.canceled || !res.filePaths.length) return { ok: false };
+  return { ok: true, path: res.filePaths[0] };
+});
+
 ipcMain.handle("get-system-theme", () => (nativeTheme.shouldUseDarkColors ? "dark" : "light"));
 ipcMain.handle("get-jcut-home", () => JCUT_HOME);
 

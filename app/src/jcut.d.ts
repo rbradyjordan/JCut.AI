@@ -50,6 +50,7 @@ declare global {
     pickFolder(): Promise<{ ok: boolean; path?: string }>;
     pickPrproj(): Promise<{ ok: boolean; path?: string }>;
     pickSavePrproj(defaultName?: string): Promise<{ ok: boolean; path?: string }>;
+    pickRelink(defaultDir?: string): Promise<{ ok: boolean; path?: string }>;
     readImage(filePath: string): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
     listWorkspaces(): Promise<{ ok: boolean; workspaces: string[]; home?: string; error?: string }>;
     reveal(p: string): Promise<{ ok: boolean }>;

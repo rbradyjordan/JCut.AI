@@ -14,6 +14,8 @@ import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { spring, TEAL_GRADIENT } from "./theme";
 import { ArrowDown, ChevronDown, ChevronRight, Close, Film, File, Folder, Image, Music, Plus, Warning, Link, Clapper } from "./Icons";
+import RelinkModal from "./RelinkModal";
+import ContextMenu from "./ContextMenu";
 
 interface Source { name: string; rel: string; type: string; origDir?: string | null; origPath?: string | null; online?: boolean; }
 type GroupBy = "folder" | "type";
@@ -34,6 +36,8 @@ export default function Sources({
   const [openBins, setOpenBins] = useState<Record<string, boolean>>({});
   const [confirmClear, setConfirmClear] = useState(false);
   const [compact, setCompact] = useState(false);
+  const [showRelink, setShowRelink] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; source: Source } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,11 +79,10 @@ export default function Sources({
     await refresh(); onChanged?.();
   };
 
-  const relinkOne = async (rel: string) => {
-    const picked = await window.jcut.pickMedia();
-    if (!picked.ok || !picked.paths?.length) return;
-    const newPath = picked.paths[0];
-    await window.jcut.jc("source-relink", ["--workspace", workspace, "--rel", rel, "--new-path", newPath]);
+  const relinkOne = async (s: Source) => {
+    const picked = await window.jcut.pickRelink(s.origDir || undefined);
+    if (!picked.ok || !picked.path) return;
+    await window.jcut.jc("source-relink", ["--workspace", workspace, "--rel", s.rel, "--new-path", picked.path]);
     await refresh(); onChanged?.();
   };
 
@@ -275,7 +278,13 @@ export default function Sources({
                       className="mb-2.5 flex items-center gap-2.5 overflow-hidden rounded-xl bg-amber-500/10 px-3 py-2.5 text-[12px] text-amber-400 ring-1 ring-amber-500/15"
                     >
                       <Warning className="h-4 w-4 shrink-0" />
-                      <span className="flex-1 leading-snug">{offlineCount} clip{offlineCount > 1 ? "s" : ""} offline — hover a clip to relink it</span>
+                      <span className="flex-1 leading-snug">{offlineCount} clip{offlineCount > 1 ? "s" : ""} offline</span>
+                      <button
+                        onClick={() => setShowRelink(true)}
+                        className="shrink-0 rounded-lg bg-amber-500/20 px-2.5 py-1 text-[11px] font-semibold text-amber-300 transition-colors hover:bg-amber-500/30"
+                      >
+                        Relink{offlineCount > 1 ? " all" : ""}
+                      </button>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -318,12 +327,16 @@ export default function Sources({
                                   key={s.rel}
                                   className={`group flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors hover:bg-surface ${offline ? "opacity-70" : ""}`}
                                   title={offline ? `Offline — original not found at: ${s.origPath}` : (s.origPath || s.rel)}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    setContextMenu({ x: e.clientX, y: e.clientY, source: s });
+                                  }}
                                 >
                                   <span className="shrink-0 text-dim">{icon}</span>
                                   <span className={`min-w-0 flex-1 truncate ${offline ? "italic text-amber-400/80" : ""}`}>{s.name}</span>
                                   {offline && (
                                     <button
-                                      onClick={() => relinkOne(s.rel)}
+                                      onClick={() => relinkOne(s)}
                                       className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium text-amber-400 opacity-0 transition hover:bg-amber-500/10 group-hover:opacity-100"
                                       title={`Relink to new location (was: ${s.origPath})`}
                                     >
@@ -348,6 +361,57 @@ export default function Sources({
               </>
             )}
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Relink modal */}
+      <AnimatePresence>
+        {showRelink && (
+          <RelinkModal
+            workspace={workspace}
+            sources={sources}
+            onClose={() => setShowRelink(false)}
+            onRelinked={() => { refresh(); onChanged?.(); }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Right-click context menu */}
+      <AnimatePresence>
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            items={[
+              ...(contextMenu.source.online === false ? [
+                {
+                  label: "Relink…",
+                  icon: <Link size={14} stroke={1.5} />,
+                  onClick: () => relinkOne(contextMenu.source),
+                },
+                {
+                  label: "Relink all offline clips",
+                  icon: <Warning size={14} stroke={1.5} />,
+                  onClick: () => setShowRelink(true),
+                },
+                { label: "", separator: true, onClick: () => {} },
+              ] : [
+                {
+                  label: "Show in Finder",
+                  icon: <Folder size={14} stroke={1.5} />,
+                  onClick: () => window.jcut.reveal(contextMenu.source.origPath || contextMenu.source.rel),
+                },
+                { label: "", separator: true, onClick: () => {} },
+              ]),
+              {
+                label: "Remove from project",
+                icon: <Close size={14} stroke={2} />,
+                danger: true,
+                onClick: () => removeOne(contextMenu.source.rel),
+              },
+            ]}
+          />
         )}
       </AnimatePresence>
     </div>
