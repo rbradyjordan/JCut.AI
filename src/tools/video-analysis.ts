@@ -89,6 +89,47 @@ async function runAnalysis(file: string, type: "composition" | "motion"): Promis
   return parsed;
 }
 
+export interface FaceAnalysis {
+  ok: boolean;
+  file: string;
+  duration_seconds: number;
+  width: number;
+  height: number;
+  frames_sampled: number;
+  sample_fps: number;
+  opencv_used: boolean;
+  face_detected: boolean;
+  summary: { mean_x: number; mean_y: number; face_detected: boolean };
+  frames: Array<{ time_seconds: number; face_count: number; subject_x: number; subject_y: number }>;
+  error?: string;
+}
+
+export async function analyzeVideoFaces(file: string, sampleFps = 2): Promise<FaceAnalysis> {
+  const python = await detectPython();
+  const { stdout } = await pexecFile(python, [
+    ANALYZE_VIDEO_PY, "--file", file, "--type", "faces",
+    "--sample-fps", String(sampleFps),
+  ], { timeout: 120000, maxBuffer: 1 << 24 });
+  const parsed = JSON.parse(stdout);
+  if (!parsed?.ok) {
+    return {
+      ok: false,
+      file,
+      duration_seconds: 0,
+      width: 0,
+      height: 0,
+      frames_sampled: 0,
+      sample_fps: sampleFps,
+      opencv_used: false,
+      face_detected: false,
+      summary: { mean_x: 0.5, mean_y: 0.4, face_detected: false },
+      frames: [],
+      error: parsed?.error || "Face detection failed",
+    };
+  }
+  return parsed as FaceAnalysis;
+}
+
 export async function analyzeVideo(file: string): Promise<VideoAnalysis> {
   const key = await cacheKey(file);
   const hit = await readDiskCache(key);

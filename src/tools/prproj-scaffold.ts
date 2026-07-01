@@ -1323,12 +1323,12 @@ export const CLIP_TEMPLATE = `	<VideoClipTrackItem ObjectID="__VCTI_ID__" ClassI
 	</PointComponentParam>
 
 	<VideoComponentParam ObjectID="__PARAM1__" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="9">
-		<IsTimeVarying>false</IsTimeVarying>
+		<IsTimeVarying>__SCALE_TIMEVARYING__</IsTimeVarying>
 		<ParameterControlType>2</ParameterControlType>
 		<UpperUIBound>200</UpperUIBound>
 		<ParameterID>2</ParameterID>
 		<Name>Scale</Name>
-		<StartKeyframe>-91445760000000000,50.,0,0,0,0,0,0</StartKeyframe>
+		<StartKeyframe>-91445760000000000,__SCALE_VALUE__,0,0,0,0,0,0</StartKeyframe>__SCALE_KEYFRAMES__
 		<LowerBound>0</LowerBound>
 		<UpperBound>10000</UpperBound>
 	</VideoComponentParam>

@@ -329,7 +329,26 @@ async function chat(model: string, messages: any[]): Promise<any> {
     res = await fetch(`${BASE_URL}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, tools: TOOLS, temperature: 0.4, stream: false }),
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: TOOLS,
+        // Driving deterministic CLI tools wants near-greedy decoding, NOT creativity.
+        // Low temp → fewer malformed/duplicate tool calls → fewer turns → less
+        // compute and power, with NO quality loss for this agentic loop.
+        temperature: 0.1,
+        // Ask reasoning models to think LESS before trivial tool calls. Not every
+        // build honors it (some still emit <think>), but where supported it cuts the
+        // biggest power sink — minutes of reasoning before a one-line inspect — and
+        // it's a harmless no-op elsewhere.
+        reasoning_effort: "low",
+        // Keep the model resident between turns so LM Studio doesn't evict + reload
+        // it (a cold reload re-reads weights from disk and reprocesses the whole
+        // prompt — slow and power-hungry). Keeping it warm also preserves the KV
+        // cache so a stable prompt PREFIX isn't reprocessed every turn.
+        keep_alive: "10m",
+        stream: false,
+      }),
       signal: ctl.signal,
     });
   } catch (e: any) {
@@ -943,7 +962,11 @@ async function main() {
                     { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } }
                   ]
                 }],
-                temperature: 0.2
+                temperature: 0.2,
+                // Keep the vision model resident too — in dual-local mode it's a
+                // separate model from the coder, and a cold reload per frame is a
+                // major power/time sink when describing many clips.
+                keep_alive: "10m",
               })
             });
             const vdata = await visionRes.json();

@@ -47,6 +47,7 @@ export interface AppSettings {
   uiFont: "system" | "inter" | "rounded" | "mono";
   reduceMotion: boolean;
   grain: boolean;
+  lastSeenVersion: string;
 }
 
 const DEFAULTS: AppSettings = {
@@ -72,12 +73,13 @@ const DEFAULTS: AppSettings = {
   panelWidth: 520,
   panelCollapsed: false,
   showReasoning: false,
-  density: "comfortable",
+  density: "compact",
   fontScale: "default",
   radius: "default",
   uiFont: "system",
   reduceMotion: false,
   grain: true,
+  lastSeenVersion: "",
 };
 
 function file(): string {

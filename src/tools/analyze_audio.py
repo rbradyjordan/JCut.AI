@@ -281,30 +281,312 @@ def analyze_beats_and_tempo(samples, sr):
     
     return bpm, confidence, beats, sections
 
+def detect_silence(samples, sr, threshold_db=-40.0, min_silence_seconds=0.3,
+                   pre_buffer_seconds=0.1, post_buffer_seconds=0.1):
+    """
+    Scan a PCM audio signal for silent regions using RMS energy thresholding.
+    Returns a list of {start, end} regions (in seconds) that fall below the dB
+    threshold for at least min_silence_seconds. Pre/post buffers shrink the
+    removed region to preserve natural speech rhythm at cut edges.
+
+    Algorithm mirrors AutoPod's Jump Cut Editor:
+      - Frame audio into 10ms windows, compute RMS per frame
+      - Convert RMS -> dB (20*log10); frames below threshold = silent
+      - Cluster consecutive silent frames into regions >= min_silence_seconds
+      - Contract each region by pre_buffer from the start and post_buffer from the end
+        so the surrounding speech sounds natural (avoids clipping the first consonant)
+    """
+    hop = int(sr * 0.01)  # 10ms frames
+    if hop < 1:
+        hop = 1
+    frames = len(samples) // hop
+    frame_db = np.full(frames, -96.0, dtype=np.float32)
+    for i in range(frames):
+        chunk = samples[i * hop: (i + 1) * hop]
+        rms = np.sqrt(np.mean(chunk ** 2)) if len(chunk) > 0 else 0.0
+        frame_db[i] = 20.0 * np.log10(max(rms, 1e-10))
+
+    fps = sr / hop
+    min_frames = int(round(min_silence_seconds * fps))
+    pre_frames = int(round(pre_buffer_seconds * fps))
+    post_frames = int(round(post_buffer_seconds * fps))
+
+    silent_regions = []
+    in_silence = False
+    silence_start = 0
+    for i, db in enumerate(frame_db):
+        if db < threshold_db:
+            if not in_silence:
+                in_silence = True
+                silence_start = i
+        else:
+            if in_silence:
+                in_silence = False
+                length = i - silence_start
+                if length >= min_frames:
+                    start_f = silence_start + pre_frames
+                    end_f = i - post_frames
+                    if end_f > start_f:
+                        silent_regions.append({
+                            "start_seconds": round(start_f / fps, 3),
+                            "end_seconds": round(end_f / fps, 3),
+                            "duration_seconds": round((end_f - start_f) / fps, 3),
+                        })
+    # Handle trailing silence
+    if in_silence:
+        length = frames - silence_start
+        if length >= min_frames:
+            start_f = silence_start + pre_frames
+            end_f = frames - post_frames
+            if end_f > start_f:
+                silent_regions.append({
+                    "start_seconds": round(start_f / fps, 3),
+                    "end_seconds": round(end_f / fps, 3),
+                    "duration_seconds": round((end_f - start_f) / fps, 3),
+                })
+
+    return silent_regions
+
+
+def analyze_rms_envelope(samples, sr, hop_length=256):
+    """
+    Return per-frame RMS envelope in dB for multi-track speaker comparison.
+    Fallback when Silero VAD is unavailable.
+    """
+    fps = sr / hop_length
+    frames = len(samples) // hop_length
+    envelope_db = []
+    for i in range(frames):
+        chunk = samples[i * hop_length: (i + 1) * hop_length]
+        rms = np.sqrt(np.mean(chunk ** 2)) if len(chunk) > 0 else 0.0
+        envelope_db.append(round(float(20.0 * np.log10(max(rms, 1e-10))), 2))
+    return envelope_db, round(fps, 4)
+
+
+# Silero VAD requires 16kHz input. Window size = 512 samples → 32ms per frame.
+_SILERO_SR = 16000
+_SILERO_HOP = 512   # samples per frame at 16kHz
+_SILERO_FPS = _SILERO_SR / _SILERO_HOP  # ~31.25 fps
+
+_silero_model = None
+_silero_loaded = False
+
+
+def _load_silero():
+    """Lazy-load Silero VAD. Returns model or None on failure."""
+    global _silero_model, _silero_loaded
+    if _silero_loaded:
+        return _silero_model
+    _silero_loaded = True
+    try:
+        import torch
+        model, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True,
+            verbose=False,
+        )
+        model.eval()
+        _silero_model = model
+    except Exception as e:
+        sys.stderr.write(f"Silero VAD load failed: {e}\n")
+        _silero_model = None
+    return _silero_model
+
+
+def load_audio_16k(file_path, duration_limit=None):
+    """Decode audio to mono 16kHz PCM float32 for Silero VAD."""
+    ffmpeg_local = os.path.join(PROJECT_ROOT, "bin", "ffmpeg")
+    ffmpeg_bin = ffmpeg_local if os.path.exists(ffmpeg_local) else "ffmpeg"
+    cmd = [ffmpeg_bin, "-y", "-v", "quiet"]
+    if duration_limit:
+        cmd += ["-t", str(duration_limit)]
+    cmd += ["-i", file_path, "-ac", "1", "-ar", str(_SILERO_SR), "-f", "s16le", "-"]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        raw, _ = proc.communicate()
+        if not raw:
+            return None
+        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception as e:
+        sys.stderr.write(f"ffmpeg 16k decode error: {e}\n")
+        return None
+
+
+def analyze_vad_envelope(file_path, duration_limit=None):
+    """
+    Run Silero VAD on an audio file and return per-frame speech probabilities
+    (0.0–1.0) at ~31.25 fps. This replaces RMS envelope for speaker detection:
+    - Silero distinguishes speech from music, noise, and silence
+    - RMS cannot: a loud but silent background music track defeats it entirely
+    - 2MB model, CPU-only, ~5ms/s of audio on Apple Silicon
+
+    Returns (probs: list[float], fps: float) or falls back to RMS on failure.
+    """
+    import torch
+
+    model = _load_silero()
+    if model is None:
+        # Graceful fallback to RMS
+        samples_11k = load_audio(file_path, duration_limit=duration_limit or 3600)[0]
+        if samples_11k is None:
+            return [], 43.0
+        rms_db, fps = analyze_rms_envelope(samples_11k, 11025)
+        # Convert dB to a 0–1 "speech probability" proxy: sigmoid-like mapping.
+        # -35dB → ~0 (silence floor), -10dB → ~1 (clear speech).
+        def db_to_prob(db):
+            clamped = max(-60.0, min(0.0, db))
+            return round(float((clamped + 60.0) / 60.0), 3)
+        return [db_to_prob(d) for d in rms_db], fps
+
+    true_dur = probe_duration(file_path)
+    limit = duration_limit or (int(true_dur) + 5 if true_dur > 0 else 3600)
+    samples = load_audio_16k(file_path, duration_limit=limit)
+    if samples is None or len(samples) == 0:
+        return [], _SILERO_FPS
+
+    wav = torch.from_numpy(samples)
+    probs_out = []
+
+    # Process in 512-sample windows. Silero resets per-call context with
+    # model.reset_states(); we call it once before the loop.
+    model.reset_states()
+    num_frames = len(samples) // _SILERO_HOP
+    for i in range(num_frames):
+        chunk = wav[i * _SILERO_HOP: (i + 1) * _SILERO_HOP]
+        if len(chunk) < _SILERO_HOP:
+            chunk = torch.nn.functional.pad(chunk, (0, _SILERO_HOP - len(chunk)))
+        with torch.no_grad():
+            speech_prob = model(chunk, _SILERO_SR).item()
+        probs_out.append(round(float(speech_prob), 4))
+
+    return probs_out, round(_SILERO_FPS, 4)
+
+
 def main():
     parser = argparse.ArgumentParser(description="JCut.AI AudioFlux Music Analysis Bridge")
     parser.add_argument("--file", required=True, help="Path to audio/video file")
+    parser.add_argument("--mode", default="beats",
+                        choices=["beats", "silence", "envelope"],
+                        help="Analysis mode")
+    # Silence detection params
+    parser.add_argument("--threshold-db", type=float, default=-40.0,
+                        help="dB level below which audio is considered silent (default -40)")
+    parser.add_argument("--min-silence", type=float, default=0.3,
+                        help="Minimum silence duration in seconds to detect (default 0.3)")
+    parser.add_argument("--pre-buffer", type=float, default=0.1,
+                        help="Seconds to keep before a silence region (default 0.1)")
+    parser.add_argument("--post-buffer", type=float, default=0.1,
+                        help="Seconds to keep after a silence region (default 0.1)")
+    # Envelope params
+    parser.add_argument("--files", nargs="+",
+                        help="Multiple audio files for multi-track envelope comparison")
     args = parser.parse_args()
-    
+
+    if args.mode == "silence":
+        if not os.path.exists(args.file):
+            print(json.dumps({"ok": False, "error": f"File not found: {args.file}"}))
+            sys.exit(1)
+        true_duration = probe_duration(args.file)
+        samples, analyzed_seconds = load_audio(args.file, duration_limit=int(true_duration) + 5)
+        if samples is None or len(samples) == 0:
+            print(json.dumps({"ok": False, "error": "Could not decode audio."}))
+            sys.exit(1)
+        regions = detect_silence(
+            samples, 11025,
+            threshold_db=args.threshold_db,
+            min_silence_seconds=args.min_silence,
+            pre_buffer_seconds=args.pre_buffer,
+            post_buffer_seconds=args.post_buffer,
+        )
+        total_removed = sum(r["duration_seconds"] for r in regions)
+        print(json.dumps({
+            "ok": True,
+            "mode": "silence",
+            "duration_seconds": round(true_duration, 2),
+            "threshold_db": args.threshold_db,
+            "min_silence_seconds": args.min_silence,
+            "pre_buffer_seconds": args.pre_buffer,
+            "post_buffer_seconds": args.post_buffer,
+            "silence_count": len(regions),
+            "total_removed_seconds": round(total_removed, 2),
+            "silent_regions": regions,
+        }, indent=2))
+        return
+
+    if args.mode == "envelope":
+        # Multi-track speaker detection — Silero VAD probabilities (0–1 per frame),
+        # with RMS dB fallback if Silero isn't available.
+        # Silero advantages over RMS:
+        #   - Distinguishes speech from music, noise, claps, room tone
+        #   - Returns clean 0/1 probability — no dB threshold to tune
+        #   - Same model weight (~2MB) works for all languages and mic types
+        files = args.files or [args.file]
+        tracks = []
+        try:
+            import torch  # noqa — only needed for Silero path
+            _silero_available = True
+        except ImportError:
+            _silero_available = False
+
+        for f in files:
+            if not os.path.exists(f):
+                tracks.append({"file": f, "ok": False, "error": "File not found"})
+                continue
+            true_dur = probe_duration(f)
+            if true_dur <= 0:
+                tracks.append({"file": f, "ok": False, "error": "Could not probe duration"})
+                continue
+
+            if _silero_available:
+                # Primary path: Silero VAD speech probabilities at ~31.25 fps
+                probs, fps = analyze_vad_envelope(f, duration_limit=int(true_dur) + 5)
+                tracks.append({
+                    "file": f,
+                    "ok": True,
+                    "duration_seconds": round(true_dur, 2),
+                    "fps": fps,
+                    "envelope_db": probs,   # values are 0–1 speech prob, not dB
+                    "vad_mode": "silero",
+                })
+            else:
+                # Fallback: RMS dB
+                samples, _ = load_audio(f, duration_limit=int(true_dur) + 5)
+                if samples is None or len(samples) == 0:
+                    tracks.append({"file": f, "ok": False, "error": "Could not decode"})
+                    continue
+                envelope_db, fps = analyze_rms_envelope(samples, 11025)
+                tracks.append({
+                    "file": f,
+                    "ok": True,
+                    "duration_seconds": round(true_dur, 2),
+                    "fps": fps,
+                    "envelope_db": envelope_db,
+                    "vad_mode": "rms",
+                })
+        print(json.dumps({"ok": True, "mode": "envelope", "tracks": tracks}, indent=2))
+        return
+
+    # Default: beats mode
     if not os.path.exists(args.file):
         print(json.dumps({"ok": False, "error": f"File not found: {args.file}"}))
         sys.exit(1)
-        
+
     samples, analyzed_seconds = load_audio(args.file)
     if samples is None or len(samples) == 0:
         print(json.dumps({"ok": False, "error": "Could not decode audio file."}))
         sys.exit(1)
-        
+
     true_duration = probe_duration(args.file)
     if true_duration <= 0:
         true_duration = analyzed_seconds
-        
+
     # 1. Key detection via AudioFlux Chroma-CQT
     key, chroma_vector = detect_key_and_features(samples, 11025)
-    
+
     # 2. Beats, BPM, confidence & sections
     bpm, confidence, beats, sections = analyze_beats_and_tempo(samples, 11025)
-    
+
     # 3. Extrapolate beats across full song
     extrapolated = False
     period_seconds = 60.0 / bpm if bpm > 0 else 0.0
@@ -314,9 +596,9 @@ def main():
             beats.append(round(next_beat, 3))
             next_beat += period_seconds
         extrapolated = True
-        
+
     downbeats = [b for idx, b in enumerate(beats) if idx % 4 == 0]
-    
+
     result = {
         "ok": True,
         "audioflux_used": HAS_AUDIOFLUX,
@@ -331,7 +613,7 @@ def main():
         "downbeats_seconds": [float(x) for x in downbeats],
         "beats_seconds": [float(x) for x in beats]
     }
-    
+
     print(json.dumps(result, indent=2))
 
 if __name__ == "__main__":

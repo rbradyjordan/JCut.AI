@@ -59,6 +59,73 @@ export async function listSequences(workspace: string): Promise<Sequence[]> {
   return out;
 }
 
+// ── CastCut project persistence ──────────────────────────────────────────────
+// CastCut projects live in $JCUT_HOME/_castcut/<id>.ccproj.json — entirely
+// separate from AI editor workspaces so the two features stay independent.
+
+export interface CastCutCamera {
+  id: string;               // stable id
+  name: string;             // "Host", "Guest", "Wide", etc.
+  type: "solo" | "wide" | "duo";
+  video_track: string;      // "V1" | "V2" | ...
+  audio_tracks: string[];   // one or more audio tracks assigned to this camera
+  color: string;            // hex color for UI
+}
+
+export interface CastCutProject {
+  id: string;
+  name: string;
+  workspace: string;        // which jcut workspace to pull sequences from
+  sequence_id: string | null;
+  cameras: CastCutCamera[];
+  settings: {
+    wide_ratio: number;
+    cooldown: number;
+    silence_threshold: number;
+    jump_cut_enabled: boolean;
+    jump_cut_threshold: number;
+    jump_cut_min_silence: number;
+  };
+  created_at: number;
+  updated_at: number;
+  last_output_seq_id: string | null;
+}
+
+const CASTCUT_DIR = path.join(JCUT_HOME, "_castcut");
+
+function ccprojPath(id: string): string {
+  return path.join(CASTCUT_DIR, `${id}.ccproj.json`);
+}
+
+export async function saveCastCutProject(proj: CastCutProject): Promise<string> {
+  await fs.mkdir(CASTCUT_DIR, { recursive: true });
+  const p = ccprojPath(proj.id);
+  await fs.writeFile(p, JSON.stringify({ ...proj, updated_at: Date.now() }, null, 2));
+  return p;
+}
+
+export async function loadCastCutProject(id: string): Promise<CastCutProject> {
+  return JSON.parse(await fs.readFile(ccprojPath(id), "utf8")) as CastCutProject;
+}
+
+export async function listCastCutProjects(): Promise<CastCutProject[]> {
+  try {
+    const files = await fs.readdir(CASTCUT_DIR);
+    const out: CastCutProject[] = [];
+    for (const f of files) {
+      if (f.endsWith(".ccproj.json")) {
+        try { out.push(JSON.parse(await fs.readFile(path.join(CASTCUT_DIR, f), "utf8"))); }
+        catch { /* skip corrupt */ }
+      }
+    }
+    return out.sort((a, b) => b.updated_at - a.updated_at);
+  } catch { return []; }
+}
+
+export async function deleteCastCutProject(id: string): Promise<void> {
+  try { await fs.unlink(ccprojPath(id)); } catch { /* already gone */ }
+}
+
 // ── Media probing via ffprobe ────────────────────────────────────────────────
 export interface ProbeResult {
   width?: number;      // display width (rotation already applied)

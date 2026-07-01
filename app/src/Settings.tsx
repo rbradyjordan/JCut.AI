@@ -458,6 +458,14 @@ export function LMStudioPanel({ settings, onChange }: { settings: AppSettings; o
                   The selected Coder model may struggle with tool-calling. Use Qwen or Llama 3.1 instruct instead.
                 </p>
               )}
+              {settings.lmStudioCoderModel && !isWeakModel(settings.lmStudioCoderModel) && isReasoningModel(settings.lmStudioCoderModel) && (
+                <p className="mt-3 text-xs text-amber-400">
+                  <Warning size={14} stroke={1.5} className="inline mr-1" />
+                  This is a “thinking” model — it spends time and power reasoning before each step.
+                  For faster, cooler, equal-quality edits, pick a non-reasoning <span className="font-semibold">instruct</span> model
+                  (e.g. Qwen2.5-7B-Instruct or Llama-3.1-8B-Instruct) as the Coder model.
+                </p>
+              )}
             </>
           ) : (
             <div className="text-amber-400">{result.error}</div>
@@ -1068,4 +1076,16 @@ function AboutSection({ onReplayOnboarding }: { onReplayOnboarding?: () => void 
 
 function isWeakModel(id: string): boolean {
   return /\bembed|embedding|obliterat|uncensor|abliterat/.test(id.toLowerCase());
+}
+
+// Reasoning/"thinking" models burn minutes (and a lot of power) generating chain-
+// of-thought before every tool call — wasteful when the work is just driving
+// deterministic CLI tools. A non-reasoning INSTRUCT model is much faster and more
+// power-efficient at the same quality for this agent loop. We can't reliably
+// disable thinking via the API, so we steer the user to a better model choice.
+function isReasoningModel(id: string): boolean {
+  const s = id.toLowerCase();
+  // qwen3-style thinkers, deepseek-r1 distills, and the common "-think/-reasoning" tags.
+  return /qwq|deepseek-r1|\br1\b|-think|thinking|reason|\bo1\b|marco-o1/.test(s)
+    || /qwen3(?!.*instruct)/.test(s); // qwen3.x defaults to thinking unless it's an -instruct build
 }

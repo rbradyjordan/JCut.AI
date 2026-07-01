@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { spring, TEAL_GRADIENT, BLUE_GRADIENT } from "./theme";
-import { Play, Thumbnail, Plus, Settings as SettingsIcon, Refresh, Music, Bolt, Cpu, Film, Brain, ChevronRight, Info, Sliders } from "./Icons";
+import { Play, Thumbnail, Plus, Refresh, Music, Bolt, Cpu, Film, Brain, ChevronRight, Info, Sliders } from "./Icons";
 import iconUrl from "./assets/icon.png";
 
 interface Stats { sequences: number; chats: number; }
@@ -60,12 +60,11 @@ const HUB_TIPS = [
 ];
 
 export default function ProjectGrid({
-  workspaces, onOpen, onNewProject, onSettings, onRefresh,
+  workspaces, onOpen, onNewProject, onRefresh,
 }: {
   workspaces: string[];
   onOpen: (ws: string) => void;
   onNewProject: (name: string) => void;
-  onSettings?: () => void;
   onRefresh?: () => void;
 }) {
   const [adding, setAdding] = useState(false);
@@ -138,37 +137,18 @@ export default function ProjectGrid({
   };
 
   return (
-    <div className="grain relative flex h-full flex-col" onClick={closeCtx}>
-      <div className="backdrop" />
-
-      {/* Traffic-light strip */}
-      <div className="drag relative z-30 h-9 shrink-0 border-b border-black/40 bg-black/20 backdrop-blur-xl" />
-
+    <div className="flex h-full" onClick={closeCtx}>
       {/* Main split dashboard layout */}
-      <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
-        {/* Left Side: Header and Projects Grid */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Left Side: Projects Grid */}
         <div className="flex flex-1 flex-col overflow-y-auto">
-          {/* Header */}
-          <div className="flex items-center gap-3 px-8 pt-6 pb-2">
-            <img src={iconUrl} alt="JCut.AI" className="h-8 w-8" />
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">Projects</h1>
-              <p className="text-sm text-dim">Pick a project to keep editing, or start a new one.</p>
-            </div>
-            <div className="ml-auto flex items-center gap-2">
-              {onSettings && (
-                <motion.button
-                  whileHover={{ scale: 1.08, rotate: 35 }} whileTap={{ scale: 0.9 }}
-                  onClick={onSettings}
-                  className="grid h-8 w-8 place-items-center rounded-full depth-chip text-dim shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] hover:text-ink"
-                  aria-label="Settings" title="Settings"
-                ><SettingsIcon size={16} stroke={1.5} /></motion.button>
-              )}
-            </div>
+          {/* Section label */}
+          <div className="px-6 pt-4 pb-2">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-dim">Projects</span>
           </div>
 
           {/* Grid */}
-          <div className="min-h-0 flex-1 px-8 pb-8 pt-3">
+          <div className="min-h-0 flex-1 px-6 pb-6 pt-2">
             <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-5">
               <AnimatePresence>
                 {localWorkspaces.map((ws, i) => (
@@ -367,6 +347,7 @@ export default function ProjectGrid({
   );
 }
 
+
 // ─── Context menu ────────────────────────────────────────────────────────────
 
 function ContextMenu({
@@ -410,7 +391,7 @@ function ContextMenu({
       exit={{ opacity: 0, scale: 0.94, y: -4 }}
       transition={spring.snappy}
       style={{ position: "fixed", left: pos.x, top: pos.y, zIndex: 200 }}
-      className="w-52 overflow-hidden rounded-xl bg-surface/95 py-1 shadow-card shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-xl"
+      className="w-52 overflow-hidden rounded-xl bg-surface/95 py-1 shadow-card backdrop-blur-xl"
       onClick={(e) => e.stopPropagation()}
     >
       {items.map((item, i) => (
@@ -496,7 +477,7 @@ function ProjectTile({
       whileTap={{ scale: 0.985 }}
       onClick={onOpen}
       onContextMenu={onContextMenu}
-      className="no-drag group flex flex-col overflow-hidden rounded-xl2 depth-card text-left shadow-card shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-xl"
+      className="no-drag group flex flex-col overflow-hidden rounded-xl2 depth-card text-left shadow-card backdrop-blur-xl"
     >
       {/* Preview photo */}
       <div className="relative aspect-video w-full overflow-hidden">

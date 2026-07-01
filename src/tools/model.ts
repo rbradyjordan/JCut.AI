@@ -22,6 +22,18 @@ export interface Fade {
 // Example slow-mo→realtime: [{at:0,speed:0.3},{at:1.0,speed:1.0}].
 export interface SpeedKeyframe { at: number; speed: number; }
 
+// A Ken Burns / motion keyframe: at a time within the CLIP (seconds from the clip's
+// trim_start), the Motion effect's scale multiplier and optional position offset.
+// `scale` is a MULTIPLIER on the clip's base fit scale: 1.0 = the clip's normal
+// fit, 1.2 = pushed in 20% ("100→120"). `pos` is an optional extra pixel offset
+// (pan). Two keyframes (start+end) make a slow push-in or pull-out; more make a
+// multi-segment move. Interpolation is linear (smooth constant-speed drift).
+export interface TransformKeyframe {
+  at: number;          // seconds from the clip's trim_start (0 = first visible frame)
+  scale: number;       // multiplier on base fit scale (1.0 = fit, 1.2 = +20% push-in)
+  pos?: Vec2;          // optional extra pixel pan offset (added to the fit position)
+}
+
 export interface Clip {
   id: string;
   track: string;              // "V1" | "V2" | "A1" ...
@@ -31,6 +43,7 @@ export interface Clip {
   trim_end_seconds: number;   // out-point within the source
   speed: number;              // constant playback rate multiplier (default 1.0)
   speed_keyframes?: SpeedKeyframe[]; // optional speed ramp; overrides `speed` when present
+  transform_keyframes?: TransformKeyframe[]; // optional Ken Burns / animated Motion (scale/pos over time)
   volume_db: number;          // 0 = unchanged; -6 = half; -60 ~ silence
   transform?: Transform;      // video/image clips only
   fade?: Fade;

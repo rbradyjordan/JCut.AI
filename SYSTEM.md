@@ -61,6 +61,42 @@ given to you at runtime). Every command prints JSON. Available commands:
 | `jc transcript-import --workspace W --file <x.srt> [--name N]` | Import a Premiere/SRT/VTT transcript |
 | `jc transcript-search --workspace W --name N --query "phrase"` | Find spoken lines → exact cut timecodes |
 | `jc transcript-list / transcript-get ...` | List transcripts / get cues (optional --from/--to) |
+| `jc analyze-silence --workspace W --file <audio/video> [--threshold-db -40] [--min-silence 0.3] [--pre-buffer 0.15] [--post-buffer 0.1]` | Detect silent regions for jump-cut editing |
+| `jc sequence-jump-cut-editor --workspace W --sequence-id ID [--audio-track A1] [--threshold-db -40] [--min-silence 0.3] [--dry-run]` | Remove silences from a sequence (AutoPod Jump Cut Editor parity) |
+| `jc analyze-multi-audio --workspace W --files '["a.mp4","b.mp4"]'` | Per-frame RMS envelopes for multi-track speaker comparison |
+| `jc sequence-detect-cameras --workspace W --sequence-id ID` | Auto-detect V/A track pairs and infer camera config for multi-camera editor |
+| `jc sequence-multi-camera-editor --workspace W --sequence-id ID --cameras '[{...}]' [--wide-shot-ratio 0.15] [--cooldown 1.5]` | Auto-switch cameras based on speaker dominance (AutoPod Multi-Camera Editor parity) |
+| `jc analyze-faces --workspace W --file <video> [--sample-fps 2]` | Detect faces → subject x/y positions for reframe biasing |
+| `jc sequence-auto-reframe-faces --workspace W --sequence-id ID --orientation vertical\|square\|horizontal` | Reframe with face detection (keeps faces in frame) |
+| `jc sequence-social-clips --workspace W --sequence-id ID [--orientations '["vertical","square","horizontal"]'] [--watermark <path>] [--end-page <path>] [--end-page-duration 4]` | Generate all social aspect ratios at once (AutoPod Social Clip Creator parity) |
+
+## AutoPod-parity tools (pure algorithmic — no LLM required)
+
+These three tools replicate AutoPod's core features. They run fully locally using audio/video analysis — no AI inference needed.
+
+**Jump Cut Editor** (`sequence-jump-cut-editor`): Removes silences from a sequence. Always run `analyze-silence --dry-run` first to preview cuts. Default -40dB threshold works for most podcast audio; lower it (e.g. -30dB) for louder rooms or raise it (-50dB) for quiet mics. The `--pre-buffer` and `--post-buffer` flags (default 0.15s/0.1s) preserve natural speech rhythm at cut edges. Example:
+```
+jc analyze-silence --workspace W --file source/audio/interview.mp3 --threshold-db -40 --min-silence 0.3
+jc sequence-jump-cut-editor --workspace W --sequence-id ID --audio-track A1 --threshold-db -40 --min-silence 0.3 --dry-run
+jc sequence-jump-cut-editor --workspace W --sequence-id ID --audio-track A1 --threshold-db -40
+```
+
+**Multi-Camera Editor** (`sequence-multi-camera-editor`): Switches between cameras based on who is speaking. Requires the source sequence to already have video/audio clips on separate paired tracks (V1/A1 = Speaker A, V2/A2 = Speaker B, etc.). The `--cameras` JSON array maps each video+audio track to a speaker name and shot type (`solo`, `wide`, `duo`). Wide cameras are forced periodically based on `--wide-shot-ratio`. Example:
+```
+jc sequence-multi-camera-editor --workspace W --sequence-id ID \
+  --cameras '[{"video_track":"V1","audio_track":"A1","name":"Host","type":"solo"},{"video_track":"V2","audio_track":"A2","name":"Guest","type":"solo"},{"video_track":"V3","audio_track":"A3","name":"Wide","type":"wide"}]' \
+  --wide-shot-ratio 0.15 --cooldown 1.5 --output-name "Episode 12 Multicam Edit"
+```
+
+**Social Clip Creator** (`sequence-social-clips`): Creates vertical (1080×1920), square (1080×1080), and horizontal (1920×1080) versions of a sequence in one command. Use `sequence-auto-reframe-faces` first if the footage has identifiable faces — it biases the crop to keep them in frame. Watermark and end-page images are optional PNG/JPG files already in the workspace. Example:
+```
+jc analyze-faces --workspace W --file source/video/interview.mp4
+jc sequence-auto-reframe-faces --workspace W --sequence-id ID --orientation vertical
+jc sequence-social-clips --workspace W --sequence-id ID \
+  --orientations '["vertical","square"]' \
+  --watermark source/images/logo.png \
+  --end-page source/images/endcard.png --end-page-duration 5
+```
 
 **Timeline markers** (`sequence-markers-add`): Always add colored label markers to finished sequences
 to annotate the structure. Use them for content categories, shot groups, subject changes, and

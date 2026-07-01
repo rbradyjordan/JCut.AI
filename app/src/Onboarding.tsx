@@ -909,58 +909,116 @@ function StepConnectHybrid({ settings, onChange, onNext }: { settings: AppSettin
 // ─── Step 5: Workflow overview (remains same) ─────────────────────────────────
 
 function StepWorkflow({ onNext }: { onNext: () => void }) {
-  const steps = [
+  const [tab, setTab] = useState<"ai" | "castcut">("ai");
+
+  const aiSteps = [
     {
-      icon: <Folder size={20} stroke={1.5} />,
+      icon: <Folder size={18} stroke={1.5} />,
       title: "Add your footage",
-      body: "Drop clips into the Sources panel on the right. JCut only links to them -- your original files are never moved, copied, or changed.",
+      body: "Drop clips into the Sources panel. JCut only links to them — your originals are never moved or copied.",
     },
     {
-      icon: <Brain size={20} stroke={1.5} />,
+      icon: <Brain size={18} stroke={1.5} />,
       title: "Describe your vision",
-      body: `Type what you're going for -- '90-second recap, energy builds through the second half.' JCut scans your clips and transcripts and assembles a starting point based on your direction.`,
+      body: "Type what you're going for. JCut scans your clips and assembles a starting timeline based on your direction.",
     },
     {
-      icon: <Film size={20} stroke={1.5} />,
-      title: "Your timeline, roughed in",
-      body: "You get a real multi-track starting point -- clips placed, B-roll suggested, music synced. Chat to move things around, adjust pacing, or swap shots until it matches your vision.",
+      icon: <Film size={18} stroke={1.5} />,
+      title: "Refine the cut",
+      body: "Chat to move things, adjust pacing, or swap shots. The timeline updates in real time.",
     },
     {
-      icon: <Sparkle size={20} stroke={1.5} />,
-      title: "Export to Premiere Pro",
-      body: "Export a Premiere .prproj and open it in Premiere Pro. Your timeline is fully editable -- refine pacing, swap shots, color grade, mix audio. JCut gave you a head start; the finished cut is all you.",
+      icon: <Sparkle size={18} stroke={1.5} />,
+      title: "Export to Premiere",
+      body: "Export a .prproj and open it in Premiere Pro. Grade, mix, and finish the cut your way.",
+    },
+  ];
+
+  const castcutSteps = [
+    {
+      icon: <Folder size={18} stroke={1.5} />,
+      title: "Create a project",
+      body: "Name it and pick (or create) a workspace. If you're starting fresh, add your footage files right here.",
+      color: "#23C6A2",
+    },
+    {
+      icon: <Film size={18} stroke={1.5} />,
+      title: "Choose a sequence",
+      body: "Pick the sequence that has your cameras on separate video tracks (V1, V2, V3…), or create a blank one.",
+      color: "#2E6BE6",
+    },
+    {
+      icon: <Brain size={18} stroke={1.5} />,
+      title: "Assign cameras & mics",
+      body: "Name each camera, mark one as Wide, and assign audio tracks. Multiple mics per speaker are supported.",
+      color: "#8B5CF6",
+    },
+    {
+      icon: <Sparkle size={18} stroke={1.5} />,
+      title: "Run the edit",
+      body: "CastCut analyzes each speaker's audio and builds a camera-switched cut automatically. No AI, no cloud.",
+      color: "#F59E0B",
     },
   ];
 
   return (
     <Slide
       header={
-        <div className="flex flex-col items-center">
-          <h2 className="text-3xl font-semibold tracking-tight">How JCut works</h2>
-          <p className="mt-2 text-dim">From a pile of clips to an editable timeline -- by chatting.</p>
+        <div className="flex flex-col items-center gap-3">
+          <h2 className="text-3xl font-semibold tracking-tight">Two ways to edit</h2>
+          <div className="flex rounded-lg bg-black/25 p-0.5 ring-1 ring-white/[0.07]">
+            {(["ai", "castcut"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`rounded-md px-4 py-1.5 text-[12px] font-semibold transition-colors ${
+                  tab === t ? "bg-surface text-ink shadow-sm" : "text-dim hover:text-ink"
+                }`}
+              >
+                {t === "ai" ? "AI Editor" : "CastCut"}
+              </button>
+            ))}
+          </div>
         </div>
       }
       footer={<PrimaryBtn onClick={onNext}>Let's go</PrimaryBtn>}
     >
-      <div className="w-full space-y-3 text-left">
-        {steps.map((s, i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, x: -12 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ ...spring.soft, delay: i * 0.07 }}
-            className="flex gap-4 rounded-xl bg-surface/60 p-4 ring-1 ring-line"
-          >
-            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-white" style={{ background: TEAL_GRADIENT }}>
-              {s.icon}
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold">{s.title}</div>
-              <div className="mt-0.5 text-sm text-dim">{s.body}</div>
-            </div>
-          </motion.div>
-        ))}
-      </div>
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={tab}
+          initial={{ opacity: 0, x: tab === "castcut" ? 12 : -12 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: tab === "castcut" ? -12 : 12 }}
+          transition={{ duration: 0.18 }}
+          className="w-full space-y-2.5 text-left"
+        >
+          {(tab === "ai" ? aiSteps : castcutSteps).map((s, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ ...spring.soft, delay: i * 0.06 }}
+              className="flex gap-3.5 rounded-xl bg-surface/60 p-3.5 ring-1 ring-line"
+            >
+              <div
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-white"
+                style={{ background: tab === "castcut" ? (s as any).color : TEAL_GRADIENT }}
+              >
+                {s.icon}
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">{s.title}</div>
+                <div className="mt-0.5 text-xs text-dim">{s.body}</div>
+              </div>
+            </motion.div>
+          ))}
+          {tab === "castcut" && (
+            <p className="pt-1 text-center text-[11px] text-dim">
+              Perfect for podcast recordings. No AI subscription required.
+            </p>
+          )}
+        </motion.div>
+      </AnimatePresence>
     </Slide>
   );
 }
@@ -992,8 +1050,8 @@ function StepDone({ onDone }: { onDone: () => void }) {
         transition={{ ...spring.soft, delay: 0.16 }}
         className="mt-2 max-w-sm text-dim"
       >
-        Create your first project, drop in some footage, and tell the AI what you want.
-        It builds the timeline -- you refine and export to Premiere.
+        Use the <strong className="text-ink">AI Editor</strong> to chat your way to a timeline,
+        or open <strong className="text-ink">CastCut</strong> for automatic multi-camera podcast editing — no AI required.
       </motion.p>
 
       <motion.div

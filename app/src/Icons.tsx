@@ -37,4 +37,7 @@ export {
   IconCheck         as Check,
   IconCoins         as Coins,
   IconBolt          as Bolt,
+  IconScissors      as Scissors,
+  IconLayoutColumns as Columns,
+  IconDeviceMobile  as Mobile,
 } from "@tabler/icons-react";

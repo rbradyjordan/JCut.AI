@@ -344,21 +344,133 @@ def analyze_motion_curve(file_path, metadata):
         sys.stderr.write(f"Motion analysis failed: {str(e)}\n")
         return {"camera_settle_seconds": 0.0, "motion_peaks_seconds": [], "error": str(e)}
 
+def detect_faces(file_path, metadata, sample_fps=2.0, max_frames=120):
+    """
+    Detect faces/subjects in a video clip and return per-frame subject positions
+    as normalized (0..1) coordinates. Used by sequence-social-clips to bias
+    auto-reframe transforms so faces stay in frame during aspect ratio changes.
+
+    Strategy (all local, no cloud API):
+      1. OpenCV Haar Cascade (built-in, fast, no model download required)
+      2. If no faces found, fall back to center (0.5, 0.5)
+
+    Returns:
+      frames: [{time_seconds, face_count, subject_x, subject_y}]
+      summary: {mean_x, mean_y, face_detected}  — clip-level average for quick reframe
+    """
+    if not HAS_OPENCV:
+        return {
+            "ok": False,
+            "error": "OpenCV not installed — install opencv-python in the venv",
+            "frames": [],
+            "summary": {"mean_x": 0.5, "mean_y": 0.5, "face_detected": False},
+        }
+
+    # Load Haar Cascade from OpenCV's built-in data.
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    if not os.path.exists(cascade_path):
+        return {
+            "ok": False,
+            "error": f"Haar cascade not found at {cascade_path}",
+            "frames": [],
+            "summary": {"mean_x": 0.5, "mean_y": 0.5, "face_detected": False},
+        }
+
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+    duration = metadata.get("duration", 0)
+    if duration <= 0:
+        return {
+            "ok": False, "error": "Invalid duration",
+            "frames": [], "summary": {"mean_x": 0.5, "mean_y": 0.5, "face_detected": False},
+        }
+
+    cap = cv2.VideoCapture(file_path)
+    if not cap.isOpened():
+        return {
+            "ok": False, "error": "Could not open video",
+            "frames": [], "summary": {"mean_x": 0.5, "mean_y": 0.5, "face_detected": False},
+        }
+
+    native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_interval = max(1, int(round(native_fps / sample_fps)))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+
+    frames_out = []
+    frame_idx = 0
+    sampled = 0
+
+    while sampled < max_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_idx % frame_interval == 0:
+            t = frame_idx / native_fps
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5,
+                minSize=(max(20, width // 20), max(20, height // 20))
+            )
+            if len(faces) > 0:
+                # Use centroid of the largest face detected.
+                areas = [(w * h, x, y, w, h) for (x, y, w, h) in faces]
+                _, x, y, w, h = max(areas)
+                cx = (x + w / 2) / width
+                cy = (y + h / 2) / height
+                # Bias slightly upward: keep face in upper-half of frame.
+                cy = max(0.1, min(0.9, cy - 0.05))
+            else:
+                cx, cy = 0.5, 0.4  # sensible default: slightly above center
+            frames_out.append({
+                "time_seconds": round(t, 3),
+                "face_count": int(len(faces)),
+                "subject_x": round(cx, 3),
+                "subject_y": round(cy, 3),
+            })
+            sampled += 1
+        frame_idx += 1
+
+    cap.release()
+
+    face_detected = any(f["face_count"] > 0 for f in frames_out)
+    xs = [f["subject_x"] for f in frames_out] or [0.5]
+    ys = [f["subject_y"] for f in frames_out] or [0.4]
+    mean_x = round(float(np.mean(xs)), 3)
+    mean_y = round(float(np.mean(ys)), 3)
+
+    return {
+        "ok": True,
+        "file": file_path,
+        "duration_seconds": round(duration, 2),
+        "width": width,
+        "height": height,
+        "frames_sampled": len(frames_out),
+        "sample_fps": sample_fps,
+        "opencv_used": True,
+        "face_detected": face_detected,
+        "summary": {"mean_x": mean_x, "mean_y": mean_y, "face_detected": face_detected},
+        "frames": frames_out,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="JCut.AI OpenCV Video Analysis Bridge")
     parser.add_argument("--file", required=True, help="Path to video file")
-    parser.add_argument("--type", choices=["composition", "motion"], required=True, help="Type of analysis")
+    parser.add_argument("--type", choices=["composition", "motion", "faces"], required=True,
+                        help="Type of analysis")
+    parser.add_argument("--sample-fps", type=float, default=2.0,
+                        help="Frames per second to sample for face detection (default 2)")
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.file):
         print(json.dumps({"ok": False, "error": f"File not found: {args.file}"}))
         sys.exit(1)
-        
+
     metadata = probe_metadata(args.file)
     if metadata["duration"] <= 0:
         print(json.dumps({"ok": False, "error": "Could not read video metadata."}))
         sys.exit(1)
-        
+
     if args.type == "composition":
         res = classify_shot_type(args.file, metadata)
         res["ok"] = "error" not in res
@@ -368,6 +480,9 @@ def main():
         res = analyze_motion_curve(args.file, metadata)
         res["ok"] = "error" not in res
         res["opencv_used"] = HAS_OPENCV
+        print(json.dumps(res, indent=2))
+    elif args.type == "faces":
+        res = detect_faces(args.file, metadata, sample_fps=args.sample_fps)
         print(json.dumps(res, indent=2))
 
 if __name__ == "__main__":

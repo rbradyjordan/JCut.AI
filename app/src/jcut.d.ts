@@ -31,6 +31,7 @@ export interface AppSettings {
   uiFont: "system" | "inter" | "rounded" | "mono";
   reduceMotion: boolean;
   grain: boolean;
+  lastSeenVersion: string;
 }
 
 declare global {

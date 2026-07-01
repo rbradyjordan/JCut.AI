@@ -10,6 +10,29 @@
 > **Beta software.** JCut.AI is under active development. Expect rough edges and changes
 > between releases, and always keep independent backups of your footage.
 
+## What's new in v0.2.0
+
+### CastCut — multi-camera podcast editor
+
+CastCut is a purpose-built podcast editing tool that lives alongside the AI Editor. It requires no AI subscription and runs entirely on your machine.
+
+**How it works:**
+1. Create a CastCut project (new or existing workspace)
+2. Choose the sequence containing your podcast footage — each camera on its own V/A track pair
+3. Assign speakers and microphones — supports multiple lav mics per camera
+4. Set cooldown, wide-shot ratio, and silence removal preferences
+5. CastCut analyzes speaker audio and builds a camera-switched cut automatically
+
+**Features:**
+- **ML-based speaker detection** — Silero VAD (2MB model, runs locally) distinguishes speech from music, room tone, and environmental noise — no dB threshold to tune
+- **Wide shot forcing** — mark a group/room camera as Wide; CastCut cuts to it during silence and maintains your target wide-shot ratio across the edit
+- **Jump Cut Editor** — removes silences with configurable threshold, minimum duration, and pre/post buffers
+- **Social Clip Creator** — generates vertical (9:16), square (1:1), and horizontal (16:9) versions in one command
+- **Face-aware reframe** — OpenCV Haar Cascade detects faces and biases the crop to keep speakers in frame
+- **No cloud, no subscription** — everything runs locally via ffmpeg + PyTorch
+
+Access CastCut from the **CastCut tab** on the launch screen, or the **CastCut button** in the editor toolbar.
+
 Describe what you're going for. JCut scans your clips, assembles a starting point, and
 exports an editable Premiere Pro project. From there, it's your cut — refine pacing, adjust
 grades, mix audio, and finish it exactly the way you'd finish any project in Premiere.

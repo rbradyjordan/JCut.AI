@@ -526,6 +526,37 @@ export function buildPrprojXml(
   //      (Audio-only clips are deferred — warned below.)
   // ─────────────────────────────────────────────────────────────────────────────
   const seqFrameRateTicks = fpsTicksAndDrop(fps).ticksPerFrame;
+  // Build the Scale-param substitutions for a clip. Base fit% matches the existing
+  // export (fit-to-canvas). With transform_keyframes, the Scale becomes time-varying:
+  // each keyframe's value = basePct * kf.scale (so kf.scale 1.0→1.2 = push-in 100→120
+  // relative to the fitted size). Keyframe time is in SOURCE ticks measured from the
+  // clip's trim_start (the media in-point). Linear interpolation (flag tail 0,0,0,0,0,0).
+  const scaleSubsFor = (c: Clip, cw: number, ch: number, sw: number, sh: number, srcFps: number): Record<string, string> => {
+    const basePct = (sw && sh) ? Math.min(cw / sw, ch / sh) * 100 : 100;
+    const fmt = (n: number) => {
+      // Premiere writes scale values like "50." or "60.5" — trailing dot for integers.
+      const r = Math.round(n * 1000) / 1000;
+      return Number.isInteger(r) ? `${r}.` : String(r);
+    };
+    const kfs = c.transform_keyframes;
+    if (!kfs || kfs.length < 2) {
+      return { __SCALE_TIMEVARYING__: "false", __SCALE_VALUE__: fmt(basePct), __SCALE_KEYFRAMES__: "" };
+    }
+    // Sorted, de-duplicated by time. Times are seconds from trim_start → source ticks.
+    const inTicks = secToTicks(c.trim_start_seconds);
+    const sorted = [...kfs].sort((a, b) => a.at - b.at);
+    const lines = sorted.map((k) => {
+      const tTicks = inTicks + BigInt(Math.round(k.at * TICKS_PER_SECOND));
+      return `\t\t\t<Keyframe>${tTicks.toString()},${fmt(basePct * k.scale)},0,0,0,0,0,0</Keyframe>`;
+    });
+    const block = `\n\t\t<Keyframes Version="1">\n${lines.join("\n")}\n\t\t</Keyframes>`;
+    // StartKeyframe value = first keyframe's value (the param's value before the first kf).
+    return {
+      __SCALE_TIMEVARYING__: "true",
+      __SCALE_VALUE__: fmt(basePct * sorted[0].scale),
+      __SCALE_KEYFRAMES__: block,
+    };
+  };
   for (const c of seq.clips) {
     if (!isVideoClip(c)) {
       // Audio-only clip on an A-track — not yet supported by the template path.
@@ -587,6 +618,7 @@ export function buildPrprojXml(
       __MOD_HASH__: modHash,
       __MOD_BODY__: modStateBody(modUuid),
       ...labelSubs(c.label_color),
+      ...scaleSubsFor(c, seq.settings.width, seq.settings.height, width, height, srcFps),
     };
 
     // Stamp the clip template + its (empty) per-clip Markers object.
@@ -607,8 +639,8 @@ export function buildPrprojXml(
     if (c.speed_keyframes?.length) {
       warnings.push(`Clip "${c.id}": speed ramp not exported — adjust in Premiere.`);
     }
-    if (c.transform) {
-      warnings.push(`Clip "${c.id}": transform (position/scale/rotation) not exported — set in Premiere's Effect Controls.`);
+    if (c.transform && !c.transform_keyframes?.length) {
+      warnings.push(`Clip "${c.id}": static transform (position/rotation) not exported — set in Premiere's Effect Controls.`);
     }
   }
 
