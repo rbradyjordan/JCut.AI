@@ -13,19 +13,19 @@ import {
 } from "./theme";
 import { ChevronLeft } from "./Icons";
 import type { Backend, AppSettings } from "./jcut";
-import { LMStudioPanel } from "./Settings";
+import { LMStudioPanel, PremierePanelCard } from "./Settings";
 import iconUrl from "./assets/icon.png";
 import { Brain, Folder, Film, Clapper, Sparkle, ChevronRight, Warning,
   Shield, Offline, Cloud, Cpu, Check, Coins, Bolt, Sliders } from "./Icons";
 
-type Step = "welcome" | "ethics" | "terms" | "appearance" | "brain" | "connect" | "workflow" | "done";
+type Step = "welcome" | "ethics" | "terms" | "appearance" | "brain" | "connect" | "workflow" | "premiere" | "done";
 type ThemeChoice = AppSettings["theme"];
 const ONBOARDING_THEME_META: Record<ThemeChoice, { label: string; swatch: string }> = {
   system: { label: "System", swatch: "linear-gradient(135deg, #EDEEF2 0%, #0D0D0F 100%)" },
   ...THEME_META,
 };
 
-const STEPS: Step[] = ["welcome", "ethics", "terms", "appearance", "brain", "connect", "workflow", "done"];
+const STEPS: Step[] = ["welcome", "ethics", "terms", "appearance", "brain", "connect", "workflow", "premiere", "done"];
 
 export default function Onboarding({ settings, onChange, onDone }: { settings: AppSettings; onChange: (p: Partial<AppSettings>) => void; onDone: (backend: Backend, hybridMode: boolean, localMode: "single" | "dual") => void }) {
   const [step, setStep] = useState<Step>("welcome");
@@ -66,6 +66,9 @@ export default function Onboarding({ settings, onChange, onDone }: { settings: A
   } else if (step === "workflow") {
     slideKey = "workflow";
     slideEl = <StepWorkflow onNext={next} />;
+  } else if (step === "premiere") {
+    slideKey = "premiere";
+    slideEl = <StepPremiere onNext={next} />;
   } else {
     slideKey = "done";
     slideEl = <StepDone onDone={() => onDone(
@@ -1019,6 +1022,30 @@ function StepWorkflow({ onNext }: { onNext: () => void }) {
           )}
         </motion.div>
       </AnimatePresence>
+    </Slide>
+  );
+}
+
+// ─── Step: Premiere Pro companion panel (optional) ───────────────────────────
+
+function StepPremiere({ onNext }: { onNext: () => void }) {
+  return (
+    <Slide
+      header={
+        <div className="flex flex-col items-center gap-2">
+          <h2 className="text-3xl font-semibold tracking-tight">Finish in Premiere Pro</h2>
+          <p className="max-w-md text-sm text-dim">
+            JCut delivers real .prproj files. Install the free companion panel and new JCut
+            exports flow straight into your open Premiere project — and your Premiere edits
+            flow back with one click. Optional; you can install later from Settings.
+          </p>
+        </div>
+      }
+      footer={<PrimaryBtn onClick={onNext}>Continue</PrimaryBtn>}
+    >
+      <div className="w-full text-left">
+        <PremierePanelCard compact />
+      </div>
     </Slide>
   );
 }

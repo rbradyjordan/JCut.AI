@@ -38,7 +38,7 @@
   "build": {
     "appId": "ai.jcut.app",
     "productName": "JCut AI",
-    "copyright": "© 2026 JCut.AI",
+    "copyright": "\u00a9 2026 JCut.AI",
     "directories": {
       "output": "release",
       "buildResources": "../build"
@@ -75,6 +75,14 @@
       {
         "from": "../bin",
         "to": "backend/bin"
+      },
+      {
+        "from": "../premiere-extension",
+        "to": "backend/premiere-extension"
+      },
+      {
+        "from": "../third_party/silero-vad",
+        "to": "backend/third_party/silero-vad"
       }
     ],
     "mac": {

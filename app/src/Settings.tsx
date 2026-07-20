@@ -7,11 +7,11 @@ import { spring, TEAL_GRADIENT, Mode, Accent, ACCENTS, ACCENT_ORDER,
   DENSITY_META, FONT_SCALE_META, RADIUS_META, UI_FONT_META } from "./theme";
 import type { AppSettings, Backend } from "./jcut";
 import iconUrl from "./assets/icon.png";
-import { Close, Warning, Plus, Brain, MessageSquare, Sliders, Settings as SettingsIcon, Folder, Film, Refresh, Info, ChevronRight, Sparkle } from "./Icons";
+import { Close, Warning, Plus, Brain, MessageSquare, Sliders, Settings as SettingsIcon, Folder, Film, Refresh, Info, ChevronRight, Sparkle, Clapper, Check } from "./Icons";
 import { THEME_META } from "./theme";
 import WorkspacePicker from "./WorkspacePicker";
 
-type Section = "ai" | "appearance" | "chat" | "skills" | "presets" | "workspace" | "about";
+type Section = "ai" | "appearance" | "chat" | "skills" | "presets" | "premiere" | "workspace" | "about";
 type CriteriaToggle = "on" | "off" | "auto";
 
 interface WorkspaceCriteria {
@@ -32,6 +32,7 @@ const NAV: { id: Section; label: string; icon: React.ReactNode }[] = [
   { id: "chat",       label: "Chat",        icon: <MessageSquare size={16} stroke={1.5} /> },
   { id: "skills",     label: "Skills",      icon: <Sparkle size={16} stroke={1.5} /> },
   { id: "presets",    label: "Presets",     icon: <Film size={16} stroke={1.5} /> },
+  { id: "premiere",   label: "Premiere Pro", icon: <Clapper size={16} stroke={1.5} /> },
   { id: "workspace",  label: "Workspace",   icon: <Folder size={16} stroke={1.5} /> },
   { id: "about",      label: "About",       icon: <Info size={16} stroke={1.5} /> },
 ];
@@ -133,6 +134,9 @@ export default function Settings({
                 )}
                 {section === "presets" && (
                   <PresetsSection />
+                )}
+                {section === "premiere" && (
+                  <PremiereSection />
                 )}
                 {section === "workspace" && (
                   <WorkspaceSection settings={settings} onChange={onChange} />
@@ -1019,6 +1023,140 @@ function PresetsSection() {
           </button>
         )}
       </div>
+    </>
+  );
+}
+
+// ─── Premiere Pro integration ────────────────────────────────────────────────
+
+interface PanelStatus {
+  premiere_installed: boolean;
+  premiere_apps: string[];
+  panel_installed: boolean;
+  panel_version: string | null;
+  source_version: string | null;
+  panel_up_to_date: boolean;
+  debug_mode_ok: boolean;
+  install_path: string;
+}
+
+// One-click install + live status for the Premiere companion panel. Shared by
+// Settings (full section) and Onboarding (compact card).
+export function PremierePanelCard({ compact }: { compact?: boolean }) {
+  const [status, setStatus] = useState<PanelStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [installPath, setInstallPath] = useState<string>("");
+
+  const refresh = async () => {
+    const r = await window.jcut.jc("premiere-panel-status", []);
+    if (r.ok) { try { setStatus(JSON.parse(r.stdout)); } catch { /* */ } }
+  };
+  useEffect(() => { refresh(); }, []);
+
+  const install = async () => {
+    setBusy(true); setResult(null);
+    try {
+      const r = await window.jcut.jc("premiere-panel-install", []);
+      if (!r.ok) { setResult({ ok: false, msg: r.error || "Install command failed to run." }); return; }
+      const j = JSON.parse(r.stdout);
+      if (!j.ok) { setResult({ ok: false, msg: j.error || "Install failed." }); return; }
+      setInstallPath(j.installed_to || "");
+      const apps: string[] = j.premiere_apps || [];
+      setResult({
+        ok: true,
+        msg: apps.length > 0
+          ? `Panel v${j.installed_version} installed. It's in the shared Adobe folder, so it works in every installed Premiere — fully quit (⌘Q) and reopen each: ${apps.join(", ")}. Then Window ▸ Extensions ▸ JCut.AI.`
+          : `Panel v${j.installed_version} installed. Once Premiere Pro is installed, fully quit and reopen it, then Window ▸ Extensions ▸ JCut.AI.`,
+      });
+    } catch (e) {
+      setResult({ ok: false, msg: "Could not read the install result — try again." });
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const revealInstall = () => { if (installPath || status?.install_path) window.jcut.reveal(installPath || status!.install_path); };
+
+  const Row = ({ ok, label, detail }: { ok: boolean; label: string; detail?: string }) => (
+    <div className="flex items-center gap-2 text-sm">
+      <span className={`grid h-4.5 w-4.5 shrink-0 place-items-center rounded-full ${ok ? "bg-emerald-500/15 text-emerald-400" : "bg-surface2 text-dim"}`}
+        style={{ width: 18, height: 18 }}>
+        {ok ? <Check size={11} stroke={2} /> : <Close size={9} stroke={2} />}
+      </span>
+      <span>{label}</span>
+      {detail && <span className="text-xs text-dim">{detail}</span>}
+    </div>
+  );
+
+  const upToDate = status?.panel_installed && status.panel_up_to_date;
+  return (
+    <div className="space-y-3 rounded-xl2 depth-chip p-4 shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]">
+      {status ? (
+        <div className="space-y-1.5">
+          <Row ok={status.premiere_installed} label="Premiere Pro"
+            detail={status.premiere_installed
+              ? (status.premiere_apps.length > 1 ? `${status.premiere_apps.length} versions: ${status.premiere_apps.join(", ")}` : status.premiere_apps[0])
+              : "not found in /Applications"} />
+          <Row ok={!!status.panel_installed} label="JCut companion panel"
+            detail={status.panel_installed
+              ? (upToDate ? `v${status.panel_version} — up to date` : `v${status.panel_version} — update available (v${status.source_version})`)
+              : "not installed"} />
+          <Row ok={status.debug_mode_ok} label="Panel loading enabled"
+            detail={status.debug_mode_ok ? undefined : "enabled automatically on install"} />
+        </div>
+      ) : (
+        <div className="text-sm text-dim">Checking…</div>
+      )}
+
+      {status?.premiere_apps && status.premiere_apps.length > 1 && (
+        <div className="rounded-lg bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-dim">
+          The panel installs once to Adobe's shared folder and appears in <span className="text-ink">all</span> your Premiere versions. Each must be fully quit (⌘Q) and reopened to pick it up.
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={install} disabled={busy}
+          className="rounded-pill px-4 py-1.5 text-sm text-white disabled:opacity-50"
+          style={{ background: TEAL_GRADIENT }}>
+          {busy ? "Installing…" : status?.panel_installed ? (upToDate ? "Reinstall panel" : "Update panel") : "Install panel"}
+        </button>
+        {status?.panel_installed && (
+          <button onClick={revealInstall}
+            className="rounded-pill bg-surface px-3 py-1.5 text-xs text-dim shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] hover:text-ink">
+            Show in Finder
+          </button>
+        )}
+        <button onClick={refresh} title="Re-check status"
+          className="rounded-pill bg-surface px-3 py-1.5 text-sm text-dim shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] hover:text-ink">
+          <Refresh size={13} stroke={1.5} />
+        </button>
+      </div>
+      {result && (
+        <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs leading-relaxed ${result.ok ? "bg-emerald-500/10 text-emerald-300" : "bg-red-500/10 text-red-300"}`}>
+          <span className="mt-0.5 shrink-0">{result.ok ? <Check size={12} stroke={2.2} /> : <Warning size={12} stroke={2} />}</span>
+          <span>{result.msg}</span>
+        </div>
+      )}
+
+      {!compact && (
+        <div className="space-y-1 pt-1 text-xs text-dim">
+          <div className="font-medium text-ink/80">How the live round-trip works</div>
+          <div>1. JCut exports land in your project's <span className="font-mono">renders/</span> folder — the panel imports each one into your open Premiere project automatically.</div>
+          <div>2. Your Premiere saves are never overwritten: JCut writes “v2, v3…” files beside them instead.</div>
+          <div>3. “Send project to JCut” in the panel pushes your latest timeline back so JCut continues from your edits.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PremiereSection() {
+  return (
+    <>
+      <Heading title="Premiere Pro" sub="Edit in Premiere while JCut keeps working — the companion panel keeps both in sync." />
+      <PremierePanelCard />
     </>
   );
 }

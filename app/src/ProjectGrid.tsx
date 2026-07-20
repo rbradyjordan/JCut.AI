@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { spring, TEAL_GRADIENT, BLUE_GRADIENT } from "./theme";
-import { Play, Thumbnail, Plus, Refresh, Music, Bolt, Cpu, Film, Brain, ChevronRight, Info, Sliders } from "./Icons";
+import { Play, Thumbnail, Plus, Refresh, Music, Bolt, Cpu, Film, Brain, ChevronRight, Info, Sliders, Sparkle } from "./Icons";
 import iconUrl from "./assets/icon.png";
 
 interface Stats { sequences: number; chats: number; }
@@ -137,195 +137,93 @@ export default function ProjectGrid({
   };
 
   return (
-    <div className="flex h-full" onClick={closeCtx}>
-      {/* Main split dashboard layout */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Left Side: Projects Grid */}
-        <div className="flex flex-1 flex-col overflow-y-auto">
-          {/* Section label */}
-          <div className="px-6 pt-4 pb-2">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-dim">Projects</span>
-          </div>
-
-          {/* Grid */}
-          <div className="min-h-0 flex-1 px-6 pb-6 pt-2">
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-5">
-              <AnimatePresence>
-                {localWorkspaces.map((ws, i) => (
-                  <ProjectTile
-                    key={ws} workspace={ws} index={i}
-                    onOpen={() => onOpen(ws)}
-                    onContextMenu={(e) => openCtx(ws, e)}
-                  />
-                ))}
-              </AnimatePresence>
-
-              {/* New project tile */}
-              <motion.div layout initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-                transition={spring.soft} className="no-drag flex flex-col">
-                {adding ? (
-                  <div className="flex aspect-video flex-col items-center justify-center gap-3 rounded-xl2 border border-dashed border-line depth-chip p-4">
-                    <input
-                      autoFocus value={name} onChange={(e) => setName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") submitNew(); if (e.key === "Escape") { setAdding(false); setName(""); } }}
-                      placeholder="Project name"
-                      className="w-full rounded-pill bg-surface px-4 py-2 text-center text-sm shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] focus:outline-none"
-                    />
-                    <div className="flex gap-2">
-                      <button onClick={submitNew} className="rounded-pill px-4 py-1.5 text-sm font-medium text-white" style={{ background: TEAL_GRADIENT }}>Create</button>
-                      <button onClick={() => { setAdding(false); setName(""); }} className="rounded-pill bg-surface2 px-4 py-1.5 text-sm text-dim shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]">Cancel</button>
-                    </div>
-                  </div>
-                ) : (
-                  <motion.button whileHover={{ y: -4, scale: 1.01 }} whileTap={{ scale: 0.98 }} transition={spring.snappy}
-                    onClick={() => setAdding(true)}
-                    className="group flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-xl2 border border-dashed border-line depth-chip text-dim hover:text-ink hover:border-accent/50"
-                  >
-                    <span className="grid h-12 w-12 place-items-center rounded-full text-white shadow-card transition group-hover:scale-110"
-                      style={{ background: TEAL_GRADIENT }}><Plus size={20} stroke={1.5} /></span>
-                    <span className="text-sm font-medium">New project</span>
-                  </motion.button>
-                )}
-              </motion.div>
-            </div>
-          </div>
+    <div className="flex h-full flex-col" onClick={closeCtx}>
+      {/* Header */}
+      <div className="flex shrink-0 items-center justify-between px-8 pt-6 pb-4">
+        <div>
+          <h1 className="text-[22px] font-semibold tracking-tight text-ink">AI Editor</h1>
+          <p className="mt-0.5 text-[12.5px] text-dim">Chat your way to a finished timeline. Open a project or start a new one.</p>
         </div>
-
-        {/* Right sidebar: Knowledge Hub & Tips */}
-        <div className="hidden md:flex md:w-[18rem] lg:w-[19.5rem] xl:w-[21rem] shrink-0 flex-col border-l border-line bg-black/15 px-4 py-4 lg:px-5 lg:py-5 overflow-y-auto no-drag">
-          <div className="mb-4 flex items-center gap-2.5 lg:mb-5">
-            <span className="grid h-7 w-7 place-items-center rounded-lg bg-surface2 text-accent border border-line">
-              <Brain size={15} stroke={1.5} />
-            </span>
-            <div>
-              <h2 className="text-sm font-semibold text-ink leading-tight">Knowledge Hub</h2>
-              <p className="text-[11px] text-dim">Learn tricks to automate your edit</p>
-            </div>
-          </div>
-
-          {/* Featured Tip Card */}
-          <div className="relative mb-4 overflow-hidden rounded-[1.1rem] depth-card border border-line p-3.5 lg:mb-5 lg:p-4">
-            <div className="mb-2.5 flex items-center justify-between lg:mb-3">
-              {(() => {
-                const tip = HUB_TIPS[tipIndex];
-                const IconComp = tip.icon;
-                return (
-                  <>
-                    <span
-                      className="rounded-pill px-2 py-0.5 text-[9px] font-semibold text-white uppercase tracking-[0.18em] lg:text-[10px]"
-                      style={{ background: tip.color }}
-                    >
-                      {tip.category}
-                    </span>
-                    <span className="text-dim/70">
-                      <IconComp size={15} stroke={1.5} />
-                    </span>
-                  </>
-                );
-              })()}
-            </div>
-
-            <div className="flex min-h-[11.25rem] flex-col justify-between lg:min-h-[12.5rem]">
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={tipIndex}
-                  initial={{ opacity: 0, x: 10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -10 }}
-                  transition={spring.snappy}
-                >
-                  <h3 className="mb-1.5 text-[1.05rem] font-semibold leading-tight text-ink lg:text-sm">{HUB_TIPS[tipIndex].title}</h3>
-                  <p className="mb-3 text-[12px] leading-7 text-dim lg:text-xs lg:leading-relaxed">{HUB_TIPS[tipIndex].desc}</p>
-                  
-                  {HUB_TIPS[tipIndex].cmd && (
-                    <div className="break-all rounded-xl border border-line/60 bg-surface2 px-2.5 py-1.5 font-mono text-[10px] text-accent select-all">
-                      {HUB_TIPS[tipIndex].cmd}
-                    </div>
-                  )}
-                </motion.div>
-              </AnimatePresence>
-
-              {/* Controls */}
-              <div className="mt-3 flex items-center justify-between border-t border-line/50 pt-3">
-                <div className="flex gap-1">
-                  {HUB_TIPS.map((_, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setTipIndex(idx)}
-                      className={`h-1.5 rounded-pill transition-all duration-300 ${
-                        idx === tipIndex ? "w-3 bg-accent" : "w-1.5 bg-line hover:bg-dim/50"
-                      }`}
-                    />
-                  ))}
-                </div>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => setTipIndex((prev) => (prev - 1 + HUB_TIPS.length) % HUB_TIPS.length)}
-                    className="grid h-6 w-6 place-items-center rounded-lg border border-line bg-surface2 text-dim transition-colors hover:bg-surface hover:text-ink"
-                  >
-                    <ChevronRight size={12} stroke={1.5} className="rotate-180" />
-                  </button>
-                  <button
-                    onClick={() => setTipIndex((prev) => (prev + 1) % HUB_TIPS.length)}
-                    className="grid h-6 w-6 place-items-center rounded-lg border border-line bg-surface2 text-dim transition-colors hover:bg-surface hover:text-ink"
-                  >
-                    <ChevronRight size={12} stroke={1.5} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Shortcuts */}
-          <div className="mb-4 rounded-[1.1rem] border border-line bg-black/5 p-3.5 lg:mb-5 lg:p-4">
-            <h3 className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-ink">
-              <Sliders size={13} stroke={1.5} className="text-accent" />
-              Quick Shortcuts
-            </h3>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3 text-[12px]">
-                <span className="text-dim">Open Settings</span>
-                <kbd className="rounded-lg bg-surface px-1.5 py-0.5 text-[10px] font-mono text-ink shadow-[0_1px_2px_rgba(0,0,0,0.4)] border border-line">⌘,</kbd>
-              </div>
-              <div className="flex items-center justify-between gap-3 text-[12px]">
-                <span className="text-dim">Keyboard Shortcuts</span>
-                <kbd className="rounded-lg bg-surface px-1.5 py-0.5 text-[10px] font-mono text-ink shadow-[0_1px_2px_rgba(0,0,0,0.4)] border border-line">⌘/</kbd>
-              </div>
-              <div className="flex items-center justify-between gap-3 text-[12px]">
-                <span className="text-dim">Project Context Menu</span>
-                <span className="rounded-lg border border-line bg-surface/50 px-1.5 py-0.5 text-[10px] font-medium text-ink">Right Click</span>
-              </div>
-              <div className="flex items-center justify-between gap-3 text-[12px]">
-                <span className="text-dim">Save & Refresh</span>
-                <kbd className="rounded-lg bg-surface px-1.5 py-0.5 text-[10px] font-mono text-ink shadow-[0_1px_2px_rgba(0,0,0,0.4)] border border-line">⌘R</kbd>
-              </div>
-            </div>
-          </div>
-
-          {/* Local Guide */}
-          <div className="relative mt-auto overflow-hidden rounded-[1.25rem] depth-card p-3.5 lg:rounded-[1.35rem] lg:p-4">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(var(--accent-glow-rgb),0.14),transparent_42%)]" />
-            <div className="absolute right-3.5 top-3.5 grid h-10 w-10 place-items-center rounded-2xl bg-[linear-gradient(180deg,rgba(var(--accent-glow-rgb),0.22),rgba(255,255,255,0.04))] text-accent shadow-[0_10px_30px_rgba(var(--accent-glow-rgb),0.16)] lg:right-4 lg:top-4 lg:h-11 lg:w-11">
-              <Info size={18} stroke={1.8} />
-            </div>
-            <div className="relative pr-12 lg:pr-14">
-              <div className="inline-flex items-center gap-2 rounded-pill bg-accent/12 px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-accent lg:text-[10px] lg:tracking-[0.22em]">
-                <Info size={10} stroke={2.2} />
-                Local AI Guide
-              </div>
-              <h4 className="mt-3 text-[1.05rem] font-semibold leading-tight tracking-[-0.02em] text-ink lg:text-[15px]">Keep your local engine online</h4>
-              <p className="mt-2 text-[12px] leading-6 text-dim lg:text-[11.5px]">
-                When utilizing local models, ensure LM Studio or Ollama is running on port <span className="font-semibold text-ink">1234 / 11434</span>. Check your system settings by clicking the <span className="font-semibold text-ink">Settings</span> button above.
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-dim">
-                <span className="rounded-pill bg-white/5 px-2 py-1 text-ink">LM Studio</span>
-                <span className="rounded-pill bg-white/5 px-2 py-1 text-ink">Ollama</span>
-                <span className="text-accent">Local-ready</span>
-              </div>
-            </div>
-          </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => refresh()}
+            title="Refresh"
+            className="grid h-8 w-8 place-items-center rounded-lg text-dim transition-colors hover:bg-white/[0.05] hover:text-ink"
+          >
+            <Refresh size={15} stroke={1.5} />
+          </button>
+          <motion.button
+            whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+            onClick={() => setAdding(true)}
+            className="flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[12.5px] font-semibold text-white shadow-sm"
+            style={{ background: TEAL_GRADIENT }}
+          >
+            <Plus size={14} stroke={2} /> New project
+          </motion.button>
         </div>
       </div>
+
+      {/* Grid */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-8">
+        {localWorkspaces.length === 0 && !adding ? (
+          <div className="mt-6 rounded-2xl border border-dashed border-line bg-black/10 px-6 py-16 text-center">
+            <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl text-white shadow-card" style={{ background: TEAL_GRADIENT }}>
+              <Sparkle size={24} stroke={1.5} />
+            </div>
+            <p className="text-base font-semibold text-ink">Create your first AI project</p>
+            <p className="mx-auto mt-1 max-w-sm text-[12.5px] text-dim">A project holds your footage, chats, and timelines. Add footage, then describe the edit you want.</p>
+            <motion.button
+              whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+              onClick={() => setAdding(true)}
+              className="mx-auto mt-5 flex items-center gap-1.5 rounded-pill px-5 py-2.5 text-sm font-semibold text-white shadow-card"
+              style={{ background: TEAL_GRADIENT }}
+            >
+              <Plus size={16} stroke={2} /> New project
+            </motion.button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-5">
+            <AnimatePresence>
+              {localWorkspaces.map((ws, i) => (
+                <ProjectTile
+                  key={ws} workspace={ws} index={i}
+                  onOpen={() => onOpen(ws)}
+                  onContextMenu={(e) => openCtx(ws, e)}
+                />
+              ))}
+            </AnimatePresence>
+
+            {/* New project tile */}
+            <motion.div layout initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+              transition={spring.soft} className="no-drag flex flex-col">
+              {adding ? (
+                <div className="flex aspect-video flex-col items-center justify-center gap-3 rounded-xl2 border border-dashed border-line depth-chip p-4">
+                  <input
+                    autoFocus value={name} onChange={(e) => setName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") submitNew(); if (e.key === "Escape") { setAdding(false); setName(""); } }}
+                    placeholder="Project name"
+                    className="w-full rounded-pill bg-surface px-4 py-2 text-center text-sm shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)] focus:outline-none"
+                  />
+                  <div className="flex gap-2">
+                    <button onClick={submitNew} className="rounded-pill px-4 py-1.5 text-sm font-medium text-white" style={{ background: TEAL_GRADIENT }}>Create</button>
+                    <button onClick={() => { setAdding(false); setName(""); }} className="rounded-pill bg-surface2 px-4 py-1.5 text-sm text-dim shadow-[0px_1px_0px_rgba(255,255,255,0.04)_inset,0px_4px_16px_rgba(0,0,0,0.3)]">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <motion.button whileHover={{ y: -4, scale: 1.01 }} whileTap={{ scale: 0.98 }} transition={spring.snappy}
+                  onClick={() => setAdding(true)}
+                  className="group flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-xl2 border border-dashed border-line depth-chip text-dim hover:text-ink hover:border-accent/50"
+                >
+                  <span className="grid h-12 w-12 place-items-center rounded-full text-white shadow-card transition group-hover:scale-110"
+                    style={{ background: TEAL_GRADIENT }}><Plus size={20} stroke={1.5} /></span>
+                  <span className="text-sm font-medium">New project</span>
+                </motion.button>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </div>
+
 
       {/* Context menu */}
       <AnimatePresence>

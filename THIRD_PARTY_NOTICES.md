@@ -49,3 +49,13 @@ through the app/backend dependency manifests.
 - Keep the vendored `LICENSE` and `NOTICE` files under `third_party/` intact.
 - If additional third-party models, weights, or repositories are bundled later,
   add them here and carry forward their original license text where required.
+
+## Silero VAD (silero_vad.onnx)
+- Source: https://github.com/snakers4/silero-vad
+- License: MIT (see third_party/silero-vad/LICENSE)
+- Used for on-device voice-activity detection in the multi-camera editor.
+
+## ONNX Runtime (onnxruntime-node)
+- Source: https://github.com/microsoft/onnxruntime
+- License: MIT
+- Used to run the Silero VAD model in Node without Python.

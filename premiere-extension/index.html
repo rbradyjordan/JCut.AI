@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JCut CastCut</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --card: #1c1c1e;
+    --card-hi: #2c2c2e;
+    --sep: rgba(255,255,255,0.08);
+    --label: #f5f5f7;
+    --secondary: #9a9aa2;
+    --tertiary: #6c6c72;
+    --accent: #2ec5a6;
+    --accent-2: #2e6be6;
+    --grad: linear-gradient(135deg, #23c6a2, #2e6be6);
+    --danger: #ff6b6b;
+    --radius: 14px;
+    --radius-sm: 10px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(120% 80% at 50% -10%, #17171b 0%, var(--bg) 60%);
+    color: var(--label);
+    font: 500 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.01em;
+    padding: 14px 14px 22px;
+  }
+  input, select, textarea { font-family: inherit; letter-spacing: inherit; }
+
+  /* ── Header ─────────────────────────────────────────── */
+  .hero { display: flex; align-items: center; gap: 11px; margin-bottom: 4px; }
+  .hero .glyph {
+    width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+    background: var(--grad); display: grid; place-items: center;
+    box-shadow: 0 6px 18px rgba(46,107,230,0.28), inset 0 1px 0 rgba(255,255,255,0.25);
+  }
+  .hero h1 { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: -0.02em; }
+  .hero p { margin: 1px 0 0; font-size: 11.5px; color: var(--secondary); }
+  .hero .info-btn {
+    margin-left: auto; width: 26px; height: 26px; border-radius: 50%;
+    background: var(--card); color: var(--secondary); border: 0; cursor: pointer;
+    display: grid; place-items: center; transition: .15s;
+  }
+  .hero .info-btn:hover { background: var(--card-hi); color: var(--label); }
+
+  /* ── Cards / grouped lists ──────────────────────────── */
+  .card {
+    background: var(--card); border-radius: var(--radius);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.35);
+    margin-top: 12px; overflow: hidden;
+  }
+  .card.pad { padding: 14px; }
+  .group-label {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--tertiary); margin: 18px 4px 7px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px; min-height: 44px;
+    border-top: 0.5px solid var(--sep);
+  }
+  .row:first-child { border-top: 0; }
+  .row .r-label { font-size: 13.5px; }
+  .row .r-sub { font-size: 11px; color: var(--secondary); margin-top: 1px; }
+  .row .spacer { margin-left: auto; }
+  .row .r-value { color: var(--secondary); font-size: 13px; }
+
+  /* ── Buttons ────────────────────────────────────────── */
+  button { font-family: inherit; }
+  .btn {
+    border: 0; border-radius: 12px; cursor: pointer; font-weight: 600;
+    font-size: 14px; padding: 12px 16px; color: #fff; background: var(--card-hi);
+    transition: transform .08s ease, filter .15s ease, opacity .15s;
+    -webkit-user-select: none;
+  }
+  .btn:active { transform: scale(0.975); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { background: var(--grad); box-shadow: 0 8px 20px rgba(46,107,230,0.25); }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
+  .btn.full { width: 100%; }
+  .btn.ghost { background: var(--card); color: var(--label); }
+  .btn.sm { font-size: 13px; padding: 9px 14px; border-radius: 10px; }
+  .btn-row { display: flex; gap: 9px; margin-top: 12px; }
+
+  /* ── iOS segmented control ──────────────────────────── */
+  .seg {
+    display: flex; background: rgba(0,0,0,0.35); border-radius: 9px;
+    padding: 2px; gap: 2px;
+  }
+  .seg button {
+    flex: 1; border: 0; background: transparent; color: var(--secondary);
+    font-size: 12px; font-weight: 600; padding: 6px 4px; border-radius: 7px;
+    cursor: pointer; transition: .15s; white-space: nowrap;
+  }
+  .seg button.on {
+    background: var(--card-hi); color: var(--label);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+
+  /* ── iOS toggle switch ──────────────────────────────── */
+  .switch { position: relative; width: 44px; height: 26px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: #3a3a3c; transition: .22s; pointer-events: none;
+  }
+  .switch .knob {
+    position: absolute; top: 2px; left: 2px; width: 22px; height: 22px;
+    border-radius: 50%; background: #fff; transition: .22s;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.35); pointer-events: none;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track + .knob { transform: translateX(18px); }
+
+  /* ── Inputs ─────────────────────────────────────────── */
+  .txt {
+    background: transparent; border: 0; color: var(--label);
+    font-size: 13.5px; font-weight: 600; width: 100%; padding: 0;
+    -webkit-user-select: text; user-select: text;
+  }
+  .txt:focus { outline: none; }
+  select.menu {
+    -webkit-appearance: none; appearance: none;
+    background: var(--card-hi); color: var(--label);
+    border: 0; border-radius: 8px; padding: 6px 26px 6px 10px; font-size: 12.5px;
+    font-weight: 600; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%239a9aa2' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 9px center;
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    border-radius: 999px; background: #3a3a3c; outline: none; margin: 0;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.4); cursor: pointer;
+  }
+
+  /* ── Camera cards ───────────────────────────────────── */
+  #camList { display: flex; flex-direction: column; gap: 10px; }
+  .cam {
+    background: var(--card); border-radius: var(--radius); padding: 12px 13px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 6px 18px rgba(0,0,0,0.3);
+    border-left: 3px solid var(--accent);
+  }
+  .cam.off { opacity: .5; }
+  .cam-top { display: flex; align-items: center; gap: 10px; }
+  .cam-badge {
+    font-size: 10px; font-weight: 700; color: var(--secondary);
+    background: rgba(255,255,255,0.06); border-radius: 6px; padding: 3px 6px;
+    letter-spacing: .03em; flex-shrink: 0;
+  }
+  .cam-mic { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .cam-mic .lbl { font-size: 12px; color: var(--secondary); }
+
+  /* ── How-to ─────────────────────────────────────────── */
+  .howto { display: none; }
+  .howto.show { display: block; }
+  .howto .step { display: flex; gap: 10px; padding: 8px 0; border-top: 0.5px solid var(--sep); }
+  .howto .step:first-child { border-top: 0; }
+  .howto .n {
+    width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+    background: var(--grad); color: #fff; font-size: 11px; font-weight: 700;
+    display: grid; place-items: center;
+  }
+  .howto .step div { font-size: 12px; color: var(--secondary); }
+  .howto .step b { color: var(--label); }
+
+  /* ── Log ────────────────────────────────────────────── */
+  #log { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; }
+  .logline {
+    font-size: 11.5px; padding: 8px 11px; border-radius: 9px;
+    background: var(--card); color: var(--secondary);
+    display: flex; align-items: flex-start; gap: 7px;
+  }
+  .logline.ok { color: #7ee0c0; background: rgba(46,197,166,0.09); }
+  .logline.err { color: #ff9b9b; background: rgba(255,107,107,0.09); }
+  .logline .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-top: 5px; flex-shrink: 0; opacity: .8; }
+  .plan { font-family: ui-monospace, "SF Mono", monospace; font-size: 10.5px; color: #9fb7d8; }
+
+  /* ── Collapsible (settings / advanced) ──────────────── */
+  details { margin-top: 12px; }
+  details > summary {
+    list-style: none; cursor: pointer; display: flex; align-items: center;
+    gap: 8px; padding: 12px 14px; background: var(--card); border-radius: var(--radius);
+    font-size: 13.5px; font-weight: 600;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 6px 18px rgba(0,0,0,0.3);
+  }
+  details[open] > summary { border-radius: var(--radius) var(--radius) 0 0; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary .chev { margin-left: auto; color: var(--tertiary); transition: .2s; }
+  details[open] > summary .chev { transform: rotate(90deg); }
+  details .body {
+    background: var(--card); border-radius: 0 0 var(--radius) var(--radius);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.3); padding: 4px 14px 14px;
+    border-top: 0.5px solid var(--sep);
+  }
+  .set-row { padding: 12px 0 10px; border-top: 0.5px solid var(--sep); }
+  .set-row:first-child { border-top: 0; }
+  .set-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .set-head .k { font-size: 13px; }
+  .set-head .v { font-size: 13px; font-weight: 700; color: var(--accent); }
+
+  .seqchip {
+    display: inline-flex; align-items: center; gap: 7px; margin-top: 3px;
+    font-size: 11.5px; color: var(--secondary);
+  }
+  .seqchip b { color: var(--label); font-weight: 600; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+  <div class="hero">
+    <div class="glyph">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="8" height="16" rx="1.5"/><rect x="13" y="4" width="8" height="16" rx="1.5"/>
+      </svg>
+    </div>
+    <div>
+      <h1>CastCut</h1>
+      <p>Multicam editing, right inside Premiere</p>
+    </div>
+    <button class="info-btn" id="infoBtn" title="How to use">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+    </button>
+  </div>
+
+  <!-- How to use -->
+  <div class="card pad howto" id="howto">
+    <div class="step"><div class="n">1</div><div>Open the sequence with your cameras — each camera's video on its own track (<b>V1, V2, V3…</b>), each mic on an audio track.</div></div>
+    <div class="step"><div class="n">2</div><div>Tap <b>Read sequence</b>. Your cameras appear below.</div></div>
+    <div class="step"><div class="n">3</div><div>Name each camera, choose <b>Solo / Wide / Duo</b>, and pick its mic.</div></div>
+    <div class="step"><div class="n">4</div><div>Tap <b>Create multicam edit</b>. CastCut cuts between angles automatically. Works on a duplicate by default — ⌘Z undoes.</div></div>
+  </div>
+
+  <!-- Read sequence -->
+  <div class="card pad" style="margin-top:14px">
+    <button id="readBtn" class="btn primary full">Read sequence</button>
+    <div id="seqInfo" class="seqchip hidden"></div>
+  </div>
+
+  <!-- Setup (hidden until read) -->
+  <div id="setup" class="hidden">
+    <div class="group-label">Cameras</div>
+    <div id="camList"></div>
+
+    <details id="settingsBox">
+      <summary>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.9 1.1V22a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 20.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.3.66.98 1.08 1.7 1H22a2 2 0 0 1 0 4h-.09c-.72-.02-1.4.4-1.51 1z"/></svg>
+        Editing settings
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+      </summary>
+      <div class="body">
+        <div class="set-row">
+          <div class="set-head"><span class="k">Minimum time between cuts</span><span class="v"><span id="valCooldown">1.5</span>s</span></div>
+          <input type="range" id="setCooldown" min="0.5" max="5" step="0.5" value="1.5">
+        </div>
+        <div class="set-row">
+          <div class="set-head"><span class="k">Confirm a speaker after</span><span class="v"><span id="valMinSpeech">0.5</span>s</span></div>
+          <input type="range" id="setMinSpeech" min="0.1" max="2" step="0.1" value="0.5">
+        </div>
+        <div class="set-row">
+          <div class="set-head"><span class="k">Wide-shot amount</span><span class="v"><span id="valWide">15</span>%</span></div>
+          <input type="range" id="setWide" min="0" max="60" step="5" value="15">
+        </div>
+        <div class="set-row">
+          <div class="set-head"><span class="k">Max shot length</span><span class="v" id="valMaxWrap"><span id="valMaxShot">0</span>s</span></div>
+          <input type="range" id="setMaxShot" min="0" max="30" step="1" value="0">
+        </div>
+        <div class="set-row">
+          <div class="set-head"><span class="k">Silence sensitivity</span><span class="v"><span id="valThresh">-35</span>dB</span></div>
+          <input type="range" id="setThresh" min="-60" max="-10" step="5" value="-35">
+        </div>
+      </div>
+    </details>
+
+    <div class="card" style="margin-top:12px">
+      <div class="row">
+        <div>
+          <div class="r-label">Work on a duplicate</div>
+          <div class="r-sub">Keeps your original sequence safe</div>
+        </div>
+        <label class="switch spacer"><input type="checkbox" id="dupSeq" checked><span class="track"></span><span class="knob"></span></label>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button id="previewBtn" class="btn ghost sm" style="flex:0 0 auto">Preview</button>
+      <button id="applyBtn" class="btn primary" style="flex:1">Create multicam edit</button>
+    </div>
+  </div>
+
+  <!-- Activity log -->
+  <div id="log"><div class="logline"><span class="dot"></span>Open your multicam sequence, then tap Read sequence.</div></div>
+
+  <!-- Advanced: sync -->
+  <details id="syncSection">
+    <summary>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-9-9c2.5 0 4.8 1 6.4 2.6L21 8"/><path d="M21 3v5h-5"/></svg>
+      Sync with the JCut app
+      <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+    </summary>
+    <div class="body">
+      <div class="set-row"><div class="set-head"><span class="k">JCut project</span></div><select id="wsSelect" class="menu" style="width:100%"></select></div>
+      <div class="row" style="padding-left:0;padding-right:0">
+        <div><div class="r-label">Auto-import exports</div></div>
+        <label class="switch spacer"><input type="checkbox" id="autoImport" checked><span class="track"></span><span class="knob"></span></label>
+      </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button id="watchBtn" class="btn ghost sm" style="flex:1">Start watching</button>
+        <button id="pushBtn" class="btn ghost sm" style="flex:1">Send to JCut</button>
+      </div>
+    </div>
+  </details>
+
+  <script src="js/main.js"></script>
+</body>
+</html>

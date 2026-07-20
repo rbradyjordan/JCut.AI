@@ -62,10 +62,13 @@ given to you at runtime). Every command prints JSON. Available commands:
 | `jc transcript-search --workspace W --name N --query "phrase"` | Find spoken lines → exact cut timecodes |
 | `jc transcript-list / transcript-get ...` | List transcripts / get cues (optional --from/--to) |
 | `jc analyze-silence --workspace W --file <audio/video> [--threshold-db -40] [--min-silence 0.3] [--pre-buffer 0.15] [--post-buffer 0.1]` | Detect silent regions for jump-cut editing |
-| `jc sequence-jump-cut-editor --workspace W --sequence-id ID [--audio-track A1] [--threshold-db -40] [--min-silence 0.3] [--dry-run]` | Remove silences from a sequence (AutoPod Jump Cut Editor parity) |
+| `jc sequence-jump-cut-editor --workspace W --sequence-id ID [--audio-track A1] [--threshold-db -40] [--min-silence 0.3] [--keep-gaps] [--dry-run]` | Remove silences from a sequence with a multi-track ripple (AutoPod Jump Cut Editor parity; --keep-gaps leaves gaps for review) |
 | `jc analyze-multi-audio --workspace W --files '["a.mp4","b.mp4"]'` | Per-frame RMS envelopes for multi-track speaker comparison |
 | `jc sequence-detect-cameras --workspace W --sequence-id ID` | Auto-detect V/A track pairs and infer camera config for multi-camera editor |
-| `jc sequence-multi-camera-editor --workspace W --sequence-id ID --cameras '[{...}]' [--wide-shot-ratio 0.15] [--cooldown 1.5]` | Auto-switch cameras based on speaker dominance (AutoPod Multi-Camera Editor parity) |
+| `jc prproj-sync-status --workspace W` | Premiere round-trip state: which exports the user modified in Premiere, and project copies pushed to sync/ |
+| `jc premiere-panel-status` | Companion-panel health: Premiere found, panel installed/up-to-date, CEP debug mode |
+| `jc premiere-panel-install` | One-click install/update of the Premiere companion panel (enables live round-trip) |
+| `jc sequence-multi-camera-editor --workspace W --sequence-id ID [--cameras '[{...}]'] [--wide-shot-ratio 0.15] [--cooldown 1.5]` | Auto-switch cameras based on the active speaker (AutoPod Multi-Camera Editor parity). `--cameras` is optional — omitted, V/A track pairs are auto-detected |
 | `jc analyze-faces --workspace W --file <video> [--sample-fps 2]` | Detect faces → subject x/y positions for reframe biasing |
 | `jc sequence-auto-reframe-faces --workspace W --sequence-id ID --orientation vertical\|square\|horizontal` | Reframe with face detection (keeps faces in frame) |
 | `jc sequence-social-clips --workspace W --sequence-id ID [--orientations '["vertical","square","horizontal"]'] [--watermark <path>] [--end-page <path>] [--end-page-duration 4]` | Generate all social aspect ratios at once (AutoPod Social Clip Creator parity) |
@@ -74,14 +77,18 @@ given to you at runtime). Every command prints JSON. Available commands:
 
 These three tools replicate AutoPod's core features. They run fully locally using audio/video analysis — no AI inference needed.
 
-**Jump Cut Editor** (`sequence-jump-cut-editor`): Removes silences from a sequence. Always run `analyze-silence --dry-run` first to preview cuts. Default -40dB threshold works for most podcast audio; lower it (e.g. -30dB) for louder rooms or raise it (-50dB) for quiet mics. The `--pre-buffer` and `--post-buffer` flags (default 0.15s/0.1s) preserve natural speech rhythm at cut edges. Example:
+**Jump Cut Editor** (`sequence-jump-cut-editor`): Removes silences from a sequence with a MULTI-TRACK ripple delete — every track (all cameras, all mics, markers, captions) compresses together, so multicam sequences stay frame-synced. Works with no Python/Silero installed (pure ffmpeg fallback). Always run `analyze-silence --dry-run` first to preview cuts. Default -40dB threshold works for most podcast audio; lower it (e.g. -30dB) for louder rooms or raise it (-50dB) for quiet mics. The `--pre-buffer` and `--post-buffer` flags (default 0.15s/0.1s) preserve natural speech rhythm at cut edges. Example:
 ```
 jc analyze-silence --workspace W --file source/audio/interview.mp3 --threshold-db -40 --min-silence 0.3
 jc sequence-jump-cut-editor --workspace W --sequence-id ID --audio-track A1 --threshold-db -40 --min-silence 0.3 --dry-run
 jc sequence-jump-cut-editor --workspace W --sequence-id ID --audio-track A1 --threshold-db -40
 ```
 
-**Multi-Camera Editor** (`sequence-multi-camera-editor`): Switches between cameras based on who is speaking. Requires the source sequence to already have video/audio clips on separate paired tracks (V1/A1 = Speaker A, V2/A2 = Speaker B, etc.). The `--cameras` JSON array maps each video+audio track to a speaker name and shot type (`solo`, `wide`, `duo`). Wide cameras are forced periodically based on `--wide-shot-ratio`. Example:
+**Multi-Camera Editor** (`sequence-multi-camera-editor`): Switches between cameras based on who is speaking (Silero VAD per audio track, RMS fallback). Requires the source sequence to already have video/audio clips on separate paired tracks (V1/A1 = Speaker A, V2/A2 = Speaker B, etc.). `--cameras` is OPTIONAL: omitted, the V/A pairs are auto-detected (highest of 3+ video tracks is assumed to be the wide). Pass it only to override names or shot types (`solo`, `wide`, `duo`, `trio` — a `duo`/`trio` camera is cut to when 2/3 people talk at once). AutoPod-parity extras: a camera may list several mics via `audio_tracks: ["A1","A5"]` (max activity wins); two solo cameras sharing the same mic(s) are ANGLES of one speaker — the shown angle rotates on each return, and `--max-shot N` rotates angles (or takes a wide cutaway) when one shot holds longer than N seconds while the same speaker talks. Cuts are backdated to speech onset; clips are placed at sequence-time positions so video and the A1 audio bed can never drift; wide cutaways cover sustained silence and keep `--wide-shot-ratio`. The result is a NEW sequence — use ITS id afterwards. When 2+ solo mics exist, an ffmpeg mix of ALL mics is rendered to renders/<name>.mix.wav and used as the A1 bed (the .prproj carries video only — tell the user to drop the mix file onto A1 in Premiere). Runs with no Python/Silero installed (RMS fallback, ffmpeg only). Simplest form:
+```
+jc sequence-multi-camera-editor --workspace W --sequence-id ID
+```
+With overrides:
 ```
 jc sequence-multi-camera-editor --workspace W --sequence-id ID \
   --cameras '[{"video_track":"V1","audio_track":"A1","name":"Host","type":"solo"},{"video_track":"V2","audio_track":"A2","name":"Guest","type":"solo"},{"video_track":"V3","audio_track":"A3","name":"Wide","type":"wide"}]' \
@@ -487,6 +494,29 @@ JCut reads AND writes real Premiere `.prproj` files.
   `valid` flag and any `warnings` to the user. The file opens with File > Open in Premiere.
 - **Never hand-edit `.prproj` XML** — always go through these commands; raw edits
   silently corrupt the project.
+
+### Working WHILE the user edits in Premiere (live round-trip)
+
+The user may keep an exported project open in Premiere and edit it while you keep
+working in JCut. Three mechanisms make this safe:
+
+1. **Conflict-safe exports.** `sequence-export-premiere` NEVER overwrites a
+   `.prproj` that changed since JCut wrote it (i.e. the user saved their Premiere
+   work over it). It writes `"Name v2.prproj"` (v3, v4…) beside it instead and
+   reports `versioned_from`. Tell the user: in Premiere, **File > Import** on the
+   new file brings the updated sequence into their OPEN project — no need to
+   close anything. `--force` overwrites anyway (only when the user asks).
+2. **Change detection.** `jc prproj-sync-status --workspace W` reports every
+   export as `untouched | modified_in_premiere | missing`, plus a `premiere_inbox`
+   of project copies the user pushed to `<workspace>/sync/`. Run it at the START
+   of any follow-up session that previously exported — if the user edited in
+   Premiere, import their latest state with `sequence-import-prproj` BEFORE
+   editing that timeline further, so your changes build on theirs.
+3. **Companion panel (optional).** The `premiere-extension/` CEP panel watches
+   `renders/` and auto-imports new JCut exports into the user's open project, and
+   its "Send project to JCut" button copies the saved project into `sync/` for
+   you to pick up. If the user mentions the panel, the loop is fully automatic —
+   you export, they get it; they send, you `prproj-sync-status` + import.
 
 ## Orientation & reformatting
 

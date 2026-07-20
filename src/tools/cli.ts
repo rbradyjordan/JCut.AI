@@ -34,16 +34,19 @@ import {
   parseTranscriptFile, saveTranscript, listTranscripts, loadTranscript, searchCues,
 } from "./transcript.js";
 import {
-  Sequence, SequenceMarker, MarkerColor, sequenceDuration, Orientation, orientationCanvas, orientationOf,
+  Sequence, Clip, SequenceMarker, MarkerColor, sequenceDuration, Orientation, orientationCanvas, orientationOf,
   fillTransform, isVideoTrack, clipTimelineEnd, clipTimelineDuration,
 } from "./model.js";
 import { kenBurnsKeyframes, directionForIndex } from "./kenburns.js";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { FFMPEG } from "./bin.js";
+import { analyzeVadEnvelopeNode } from "./vad.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import os from "node:os";
 import { workspaceDir } from "./store.js";
 
 const _pexecFile = promisify(execFile);
@@ -228,6 +231,257 @@ async function resolveWorkspaceMediaPath(ws: string, fileRaw: string): Promise<s
   return file;
 }
 
+// ── Premiere round-trip: export ledger + conflict-safe versioning ────────────
+// The ledger records the fingerprint of every .prproj JCut writes. If a file at
+// a target path was MODIFIED since we wrote it (the user saved their Premiere
+// work over it), we never overwrite — we version the filename instead. This is
+// what makes it safe to keep editing in JCut while the user works in Premiere:
+// the user's saved project can never be clobbered by a re-export, and
+// prproj-sync-status can tell the agent which exports carry user edits.
+interface ExportLedgerEntry {
+  path: string;
+  sequence_id: string;
+  size: number;
+  mtime_ms: number;
+  exported_at: string;
+}
+function ledgerPath(ws: string): string {
+  return path.join(workspaceDir(ws), "renders", ".jcut-exports.json");
+}
+async function readExportLedger(ws: string): Promise<ExportLedgerEntry[]> {
+  try { return JSON.parse(await fs.readFile(ledgerPath(ws), "utf8")); } catch { return []; }
+}
+async function writeExportLedger(ws: string, entries: ExportLedgerEntry[]): Promise<void> {
+  try {
+    await fs.mkdir(path.dirname(ledgerPath(ws)), { recursive: true });
+    await fs.writeFile(ledgerPath(ws), JSON.stringify(entries, null, 2));
+  } catch { /* non-fatal — versioning still protects, detection just degrades */ }
+}
+async function fileFingerprint(p: string): Promise<{ size: number; mtime_ms: number } | null> {
+  try { const st = await fs.stat(p); return { size: st.size, mtime_ms: st.mtimeMs }; } catch { return null; }
+}
+function fingerprintMatches(e: ExportLedgerEntry, fp: { size: number; mtime_ms: number }): boolean {
+  return e.size === fp.size && Math.abs(e.mtime_ms - fp.mtime_ms) < 1;
+}
+// "name.prproj" → "name v2.prproj" (an existing " vN" suffix is replaced, so
+// versions go v2 → v3, never "v2 v2").
+function versionedPath(p: string, n: number): string {
+  const ext = path.extname(p);
+  const base = p.slice(0, p.length - ext.length).replace(/ v\d+$/, "");
+  return `${base} v${n}${ext}`;
+}
+
+// ── Multi-track ripple delete ────────────────────────────────────────────────
+// Remove a sequence-time range [s, e) from EVERY track: split clips straddling
+// the boundaries, drop what's inside, and pull everything after it left. This
+// is the multi-track-safe primitive behind the Jump Cut Editor — cutting dead
+// air out of one mic's track must compress ALL camera angles equally, or a
+// multicam sequence drifts out of sync after the first cut.
+function rippleDeleteRange(seq: Sequence, s: number, e: number, ripple = true): void {
+  const d = e - s;
+  if (d <= 0.0005) return;
+  const survivors: Clip[] = [];
+  const additions: Clip[] = [];
+  for (const c of seq.clips) {
+    const speed = c.speed || 1.0;
+    const cs = c.start_time_seconds;
+    const ce = clipTimelineEnd(c);
+    if (ce <= s + 1e-6) { survivors.push(c); continue; }                       // fully before
+    if (cs >= e - 1e-6) {                                                      // fully after
+      if (ripple) c.start_time_seconds = cs - d;
+      survivors.push(c);
+      continue;
+    }
+    const startsBefore = cs < s - 1e-6;
+    const endsAfter = ce > e + 1e-6;
+    if (startsBefore && endsAfter) {
+      // Straddles the range: head keeps [cs, s); tail carries [e, ce) — shifted
+      // to butt against the head when rippling, left at e when keeping gaps.
+      // The tail is a NEW clip (fresh id, unlinked — duplicate link_ids on one
+      // track would corrupt group ops).
+      const tail: Clip = {
+        ...c,
+        id: newClipId("c"),
+        link_id: null,
+        trim_start_seconds: c.trim_start_seconds + (e - cs) * speed,
+        start_time_seconds: ripple ? s : e,
+      };
+      c.trim_end_seconds = c.trim_start_seconds + (s - cs) * speed;
+      survivors.push(c);
+      additions.push(tail);
+    } else if (startsBefore) {
+      c.trim_end_seconds = c.trim_start_seconds + (s - cs) * speed;            // cut the tail off
+      survivors.push(c);
+    } else if (endsAfter) {
+      c.trim_start_seconds = c.trim_start_seconds + (e - cs) * speed;          // cut the head off
+      c.start_time_seconds = ripple ? s : e;
+      survivors.push(c);
+    } // fully inside the range → dropped
+  }
+  seq.clips = [...survivors, ...additions];
+  if (ripple) {
+    // Markers and captions ride the timeline with the same shift.
+    for (const mk of seq.markers || []) {
+      if (mk.time_seconds >= e) mk.time_seconds = Math.round((mk.time_seconds - d) * 1000) / 1000;
+      else if (mk.time_seconds > s) mk.time_seconds = s;
+    }
+    for (const cap of seq.captions || []) {
+      const shift = (t: number) => (t >= e ? t - d : t > s ? s : t);
+      cap.start_time_seconds = shift(cap.start_time_seconds);
+      cap.end_time_seconds = shift(cap.end_time_seconds);
+    }
+  }
+  cascadeTransitions(seq);
+}
+
+// ── Deterministic no-Python fallbacks (ffmpeg-only) ──────────────────────────
+// The podcast pipeline must work with ZERO optional dependencies: no venv, no
+// torch, no network. These pure-TS analyzers decode with the bundled ffmpeg and
+// mirror analyze_audio.py's RMS math exactly, so the multicam editor and jump
+// cut editor degrade gracefully from Silero VAD to RMS instead of failing.
+const TS_ENV_SR = 11025;
+const TS_ENV_HOP = 256; // ~43 fps, same as the Python RMS path
+
+function tsDecodePcm(file: string, sr: number): Promise<Float32Array> {
+  return new Promise((resolve, reject) => {
+    const ff = spawn(FFMPEG, [
+      "-v", "quiet", "-i", file, "-ac", "1", "-ar", String(sr), "-f", "s16le", "-",
+    ]);
+    const chunks: Buffer[] = [];
+    let done = false;
+    const finish = (fn: () => void) => { if (!done) { done = true; fn(); } };
+    const timer = setTimeout(() => {
+      try { ff.kill("SIGKILL"); } catch { /* ok */ }
+      finish(() => reject(new Error("audio decode timed out")));
+    }, 300000);
+    ff.stdout.on("data", (dd: Buffer) => chunks.push(dd));
+    ff.on("error", (err: Error) => { clearTimeout(timer); finish(() => reject(err)); });
+    ff.on("close", (code: number | null) => {
+      clearTimeout(timer);
+      finish(() => {
+        if (code !== 0 && chunks.length === 0) return reject(new Error("ffmpeg decode failed"));
+        const buf = Buffer.concat(chunks);
+        const n = Math.floor(buf.length / 2);
+        const out = new Float32Array(n);
+        for (let i = 0; i < n; i++) out[i] = buf.readInt16LE(i * 2) / 32768;
+        resolve(out);
+      });
+    });
+  });
+}
+
+// 0–1 activity envelope, identical scale to analyze_audio.py's rms mode:
+// activity = (clamp(dB, -60, 0) + 60) / 60.
+async function tsActivityEnvelope(file: string): Promise<{ values: number[]; fps: number }> {
+  const pcm = await tsDecodePcm(file, TS_ENV_SR);
+  const frames = Math.floor(pcm.length / TS_ENV_HOP);
+  const values: number[] = new Array(frames);
+  for (let i = 0; i < frames; i++) {
+    let sum = 0;
+    const base = i * TS_ENV_HOP;
+    for (let j = 0; j < TS_ENV_HOP; j++) { const v = pcm[base + j]; sum += v * v; }
+    const rms = Math.sqrt(sum / TS_ENV_HOP);
+    const db = 20 * Math.log10(Math.max(rms, 1e-10));
+    values[i] = Math.round(((Math.max(-60, Math.min(0, db)) + 60) / 60) * 1000) / 1000;
+  }
+  return { values, fps: TS_ENV_SR / TS_ENV_HOP };
+}
+
+// Silence regions in SOURCE seconds — a faithful port of analyze_audio.py's
+// detect_silence (10ms RMS frames, dB threshold, min length, pre/post buffers).
+async function tsDetectSilence(
+  file: string, thresholdDb: number, minSilenceSec: number, preBufSec: number, postBufSec: number,
+): Promise<{ start_seconds: number; end_seconds: number }[]> {
+  const sr = TS_ENV_SR;
+  const pcm = await tsDecodePcm(file, sr);
+  const hop = Math.max(1, Math.floor(sr * 0.01));
+  const frames = Math.floor(pcm.length / hop);
+  const fps = sr / hop;
+  const minFrames = Math.round(minSilenceSec * fps);
+  const preFrames = Math.round(preBufSec * fps);
+  const postFrames = Math.round(postBufSec * fps);
+  const out: { start_seconds: number; end_seconds: number }[] = [];
+  let inSil = false, silStart = 0;
+  const flush = (endFrame: number) => {
+    const len = endFrame - silStart;
+    if (len < minFrames) return;
+    const s = silStart + preFrames, e = endFrame - postFrames;
+    if (e > s) out.push({ start_seconds: Math.round((s / fps) * 1000) / 1000, end_seconds: Math.round((e / fps) * 1000) / 1000 });
+  };
+  for (let i = 0; i < frames; i++) {
+    let sum = 0;
+    const base = i * hop;
+    for (let j = 0; j < hop; j++) { const v = pcm[base + j]; sum += v * v; }
+    const db = 20 * Math.log10(Math.max(Math.sqrt(sum / hop), 1e-10));
+    if (db < thresholdDb) {
+      if (!inSil) { inSil = true; silStart = i; }
+    } else if (inSil) {
+      inSil = false;
+      flush(i);
+    }
+  }
+  if (inSil) flush(frames);
+  return out;
+}
+
+// ── Premiere companion panel: source, status ─────────────────────────────────
+// The panel ships with the app (premiere-extension/ beside dist/, both in dev
+// and inside the packaged backend resources).
+function premierePanelSrc(): string {
+  return path.join(_projectRoot, "premiere-extension");
+}
+async function premierePanelStatus(destOverride?: string): Promise<{
+  premiere_installed: boolean;
+  premiere_apps: string[];
+  panel_installed: boolean;
+  panel_version: string | null;
+  source_version: string | null;
+  panel_up_to_date: boolean;
+  debug_mode: Record<string, boolean>;
+  debug_mode_ok: boolean;
+  install_path: string;
+}> {
+  const dest = destOverride ||
+    path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions", "com.jcutai.panel");
+  const readVersion = async (dir: string): Promise<string | null> => {
+    try {
+      const xml = await fs.readFile(path.join(dir, "CSXS", "manifest.xml"), "utf8");
+      return xml.match(/ExtensionBundleVersion="([^"]+)"/)?.[1] ?? null;
+    } catch { return null; }
+  };
+  let premiereApps: string[] = [];
+  try {
+    premiereApps = (await fs.readdir("/Applications")).filter((f) => /^Adobe Premiere Pro/i.test(f));
+  } catch { /* not macOS or no /Applications */ }
+  const panelVersion = await readVersion(dest);
+  const sourceVersion = await readVersion(premierePanelSrc());
+  // PlayerDebugMode lets unsigned (development) panels load. Premiere 2019+ uses
+  // CSXS 9–12; current Premiere (2024–2026) uses CEP 12 = CSXS.12. We check 9–14
+  // and treat 11/12/13/14 (current-era) passing as "enabled".
+  const defaultsBin = existsSync("/usr/bin/defaults") ? "/usr/bin/defaults" : "defaults";
+  const debugMode: Record<string, boolean> = {};
+  if (process.platform === "darwin") {
+    for (const v of [9, 10, 11, 12, 13, 14]) {
+      try {
+        const { stdout } = await _pexecFile(defaultsBin, ["read", `com.adobe.CSXS.${v}`, "PlayerDebugMode"]);
+        debugMode[`csxs-${v}`] = stdout.trim() === "1";
+      } catch { debugMode[`csxs-${v}`] = false; }
+    }
+  }
+  return {
+    premiere_installed: premiereApps.length > 0,
+    premiere_apps: premiereApps,
+    panel_installed: panelVersion != null,
+    panel_version: panelVersion,
+    source_version: sourceVersion,
+    panel_up_to_date: panelVersion != null && panelVersion === sourceVersion,
+    debug_mode: debugMode,
+    debug_mode_ok: debugMode["csxs-11"] === true || debugMode["csxs-12"] === true ||
+      debugMode["csxs-13"] === true || debugMode["csxs-14"] === true,
+    install_path: dest,
+  };
+}
+
 // Knowledge base lives at <project>/kb. From dist/tools/cli.js that's ../../kb.
 function kbDir(): string {
   return path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "kb");
@@ -249,6 +503,344 @@ const KB_TITLES: Record<string, { title: string; when: string }> = {
   "audio": { title: "Audio — Levels, Mixing & Sound", when: "Any project with audio — levels, ducking, J/L cuts, fades." },
   "color-continuity": { title: "Color & Visual Continuity", when: "Matching shots; multi-source or multi-light footage." },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multicam switching engine — shared by sequence-multi-camera-editor (JCut
+// timelines) and multicam-plan (the Premiere panel's fully-in-Premiere path).
+// Analyzes every camera's mic(s), runs the AutoPod-parity state machine
+// (dominance + hysteresis + backdated cuts + duo/trio + angle rotation +
+// wide-ratio + max-shot) and returns the camera runs on a {MULTICAM_STATE_FPS}fps
+// sequence-time grid.
+export const MULTICAM_STATE_FPS = 30;
+
+export interface MulticamCameraSpec {
+  video_track: string;
+  audio_track?: string;
+  audio_tracks?: string[];
+  name?: string;
+  type?: "solo" | "wide" | "duo" | "trio";
+}
+
+interface MulticamParams {
+  wideRatio: number;
+  cooldownSec: number;
+  minSpeechSec: number;
+  silThresh: number;
+  maxShotSec: number;
+}
+
+async function computeMulticamRuns(
+  srcSeq: Sequence,
+  cameras: MulticamCameraSpec[],
+  params: MulticamParams,
+  resolveFile: (src: string) => Promise<string>,
+) {
+  const { wideRatio, cooldownSec, minSpeechSec, silThresh, maxShotSec } = params;
+    // Step 1: analyze each distinct audio source file, then sample every
+    // camera's speech activity on a uniform sequence-time grid.
+    //
+    // ONE INDEX SPACE: every camera index below is an index into `cameras`.
+    // (The old code indexed a filtered "tracks with audio" array with full
+    // camera indices — one source-less camera and every later camera read
+    // its neighbor's envelope.)
+    // A camera may have SEVERAL mic tracks (lav + boom — AutoPod's multi-mic
+    // setup): accept audio_tracks: ["A1","A5"] alongside the single
+    // audio_track. Activity is the MAX across the camera's mics per frame.
+    const audioTracksOf = (cam: (typeof cameras)[number]): string[] => {
+      const many = (cam as any).audio_tracks;
+      if (Array.isArray(many) && many.length > 0) return many.map(String);
+      return cam.audio_track ? [cam.audio_track] : [];
+    };
+    const byStart = (x: Clip, y: Clip) => x.start_time_seconds - y.start_time_seconds;
+    // Per camera, per mic track: sorted clip list (kept separate — a
+    // speaker's mics overlap in time, so a single merged list would break
+    // the two-pointer sampling below).
+    const camTrackClips: Clip[][][] = cameras.map((cam) =>
+      audioTracksOf(cam).map((t) => srcSeq.clips.filter((c) => c.track === t).sort(byStart))
+    );
+    // Flattened per-camera view for counting, the mix, and the fallback bed.
+    const camAudioClips: Clip[][] = camTrackClips.map((lists) => lists.flat().sort(byStart));
+    if (camAudioClips.filter((list) => list.length > 0).length < 2) {
+      return { ok: false as const, error: "Need at least 2 cameras with audio clips on their assigned tracks." };
+    }
+
+    // Resolve every distinct source file referenced by any camera's audio
+    // clips (a track can hold several clips, possibly from several files).
+    const fileForSource = new Map<string, string>();
+    for (const list of camAudioClips) {
+      for (const c of list) {
+        if (!fileForSource.has(c.source_path)) {
+          fileForSource.set(c.source_path, await resolveFile(c.source_path));
+        }
+      }
+    }
+    const distinctFiles = [...new Set(fileForSource.values())];
+    let envResult: any;
+    try {
+      const { stdout } = await _pexecFile(_venvPython, [
+        _analyzeAudioPy, "--mode", "envelope",
+        "--file", distinctFiles[0],
+        "--files", ...distinctFiles,
+      ], { maxBuffer: 256 * 1024 * 1024 });
+      envResult = JSON.parse(stdout);
+    } catch {
+      // No Python venv — run Silero VAD directly in Node (vendored ONNX
+      // model + onnxruntime-node; same model, same probabilities — this is
+      // the PACKAGED app's primary path). If even that is unavailable,
+      // degrade to the deterministic pure-TS RMS envelope (ffmpeg only).
+      try {
+        const tracks = [];
+        for (const f of distinctFiles) {
+          try {
+            const env = await analyzeVadEnvelopeNode(f);
+            tracks.push({ file: f, ok: true, fps: env.fps, envelope_db: env.values, vad_mode: "silero" });
+          } catch {
+            const env = await tsActivityEnvelope(f);
+            tracks.push({ file: f, ok: true, fps: env.fps, envelope_db: env.values, vad_mode: "rms" });
+          }
+        }
+        envResult = { ok: true, mode: "envelope", tracks };
+      } catch (err2) {
+        return { ok: false as const, error: `Audio analysis failed: ${(err2 as Error).message}` };
+      }
+    }
+
+    // envelope_db is ALWAYS 0–1 activity (see analyze_audio.py contract);
+    // vad_mode says what produced it and fps can differ per file.
+    interface FileEnv { values: number[]; fps: number; mode: "silero" | "rms" }
+    const envByFile = new Map<string, FileEnv>();
+    for (let i = 0; i < distinctFiles.length; i++) {
+      const tr = envResult.tracks?.[i];
+      if (tr?.ok && Array.isArray(tr.envelope_db) && tr.envelope_db.length > 0) {
+        envByFile.set(distinctFiles[i], {
+          values: tr.envelope_db,
+          fps: tr.fps || 31.25,
+          mode: tr.vad_mode === "silero" ? "silero" : "rms",
+        });
+      }
+    }
+    if (envByFile.size === 0) {
+      return { ok: false as const, error: "Could not decode audio envelopes — check source files." };
+    }
+    const vadModes = new Set([...envByFile.values()].map((e) => e.mode));
+    const vadMode = vadModes.size > 1 ? "mixed" : [...vadModes][0];
+
+    // Per-mode activity threshold (values are 0–1 in both modes):
+    //   silero → 0.5 (50% speech confidence)
+    //   rms    → the user's dB threshold mapped onto the proxy scale (dB+60)/60
+    const rmsActivityThresh = (Math.min(0, Math.max(-60, silThresh)) + 60) / 60;
+    const threshFor = (mode: "silero" | "rms") => (mode === "silero" ? 0.5 : rmsActivityThresh);
+
+    // Uniform state-machine grid over the SEQUENCE timeline. Fixed rate,
+    // independent of each file's envelope rate — per-file fps differences
+    // (silero ~31.25 vs rms ~43) are absorbed by the sampling below.
+    const STATE_FPS = MULTICAM_STATE_FPS;
+    const seqDur = sequenceDuration(srcSeq);
+    const totalFrames = Math.floor(seqDur * STATE_FPS);
+    if (totalFrames <= 0) {
+      return { ok: false as const, error: "Sequence is empty — nothing to edit." };
+    }
+
+    // Sample each camera's activity at every grid frame, mapping sequence
+    // time → source time through the covering clip's position, trim, and
+    // speed. Multiple mics take the max. Gaps read as silence.
+    const activity: Float32Array[] = [];
+    const isOn: Uint8Array[] = [];
+    for (let i = 0; i < cameras.length; i++) {
+      const act = new Float32Array(totalFrames);
+      const on = new Uint8Array(totalFrames);
+      const lists = camTrackClips[i];
+      const ptrs = lists.map(() => 0);
+      for (let f = 0; f < totalFrames; f++) {
+        const t = f / STATE_FPS;
+        for (let li = 0; li < lists.length; li++) {
+          const clips = lists[li];
+          while (ptrs[li] < clips.length && clipTimelineEnd(clips[ptrs[li]]) <= t) ptrs[li]++;
+          const clip = clips[ptrs[li]];
+          if (!clip || clip.start_time_seconds > t) continue;
+          const env = envByFile.get(fileForSource.get(clip.source_path)!);
+          if (!env) continue;
+          const srcT = clip.trim_start_seconds + (t - clip.start_time_seconds) * (clip.speed || 1.0);
+          const v = env.values[Math.floor(srcT * env.fps)];
+          if (v == null) continue;
+          if (v > act[f]) act[f] = v;
+          if (v > threshFor(env.mode)) on[f] = 1;
+        }
+      }
+      activity.push(act);
+      isOn.push(on);
+    }
+
+    // Camera roles. Solo cameras compete on loudness; wide/duo/trio never
+    // win by loudness — they're cut to by the rules below.
+    const wideIndices = new Set(
+      cameras.map((c, i) => (c.type === "wide" ? i : -1)).filter((i) => i >= 0)
+    );
+    const duoIdx = cameras.findIndex((c) => c.type === "duo");
+    const trioIdx = cameras.findIndex((c) => c.type === "trio");
+    const speakerIndices = cameras
+      .map((_, i) => i)
+      .filter((i) => !wideIndices.has(i) && cameras[i].type !== "duo" &&
+        cameras[i].type !== "trio" && camAudioClips[i].length > 0);
+    if (speakerIndices.length === 0) {
+      return { ok: false as const, error: "No solo cameras with audio clips — nothing to switch between." };
+    }
+    const silenceCam = wideIndices.size > 0 ? [...wideIndices][0] : -1;
+
+    // ANGLE GROUPS (AutoPod parity): solo cameras that share the same mic(s)
+    // are different ANGLES of the same speaker. Dominance is decided per
+    // speaker; which angle shows rotates on each return to that speaker
+    // (and on --max-shot, below) so long conversations stay visually varied.
+    interface AngleGroup { cams: number[]; nextAngle: number }
+    const groupByKey = new Map<string, AngleGroup>();
+    const groupOfCam = new Map<number, AngleGroup>();
+    for (const i of speakerIndices) {
+      const key = audioTracksOf(cameras[i]).slice().sort().join("+");
+      let g = groupByKey.get(key);
+      if (!g) { g = { cams: [], nextAngle: 0 }; groupByKey.set(key, g); }
+      g.cams.push(i);
+      groupOfCam.set(i, g);
+    }
+    const angleGroups = [...groupByKey.values()];
+
+    const cooldownFrames = Math.max(1, Math.round(cooldownSec * STATE_FPS));
+    const minSpeechFrames = Math.max(1, Math.round(minSpeechSec * STATE_FPS));
+    // Sustained silence cuts to wide only after a longer patience than a
+    // speaker switch — brief pauses should not leave the current speaker.
+    const silenceHoldFrames = Math.max(minSpeechFrames, Math.round(1.0 * STATE_FPS));
+    // Wide-ratio enforcement uses a CONSTANT slack. The old cooldown/f
+    // formula shrank toward zero as the timeline grew, making long
+    // recordings ping-pong wide↔speaker on a fixed cadence.
+    const WIDE_SLACK = 0.05;
+    const wideWarmupFrames = Math.round(10 * STATE_FPS);
+    // A forced wide holds for a full shot so ratio catch-up comes as a few
+    // deliberate cutaways, not many slivers.
+    const wideHoldFrames = Math.max(cooldownFrames, Math.round(2.0 * STATE_FPS));
+
+    let currentCam = speakerIndices[0];
+    let cooldownLeft = 0;
+    let pendingTarget = -1;   // camera we want to switch to
+    let pendingFrames = 0;    // consecutive frames it has been desired
+    let pendingStart = 0;     // frame where it first became desired (backdating)
+    let wideShotFrames = 0;
+
+    const runs: { camIdx: number; startFrame: number; endFrame: number }[] = [];
+    let runStart = 0;
+
+    // Commit a switch at frame f. If backdateTo lands inside the current
+    // run, the cut is placed there — at speech ONSET rather than at
+    // hysteresis confirmation — so the new speaker's first words are on
+    // their own camera instead of the old one.
+    const switchTo = (cam: number, f: number, backdateTo = -1) => {
+      const cut = backdateTo > runStart && backdateTo < f ? backdateTo : f;
+      if (cut > runStart) runs.push({ camIdx: currentCam, startFrame: runStart, endFrame: cut });
+      // Reattribute the backdated frames' wide accounting to the new camera.
+      const moved = f - cut;
+      if (moved > 0) {
+        if (wideIndices.has(currentCam) && !wideIndices.has(cam)) wideShotFrames -= moved;
+        if (!wideIndices.has(currentCam) && wideIndices.has(cam)) wideShotFrames += moved;
+      }
+      runStart = cut;
+      currentCam = cam;
+      cooldownLeft = cooldownFrames;
+      pendingTarget = -1;
+      pendingFrames = 0;
+    };
+
+    const maxShotFrames = maxShotSec > 0 ? Math.max(1, Math.round(maxShotSec * STATE_FPS)) : 0;
+
+    // The opening shot counts as that speaker's first angle use, so their
+    // first RETURN already rotates to the next angle.
+    const startGroup = groupOfCam.get(currentCam);
+    if (startGroup) startGroup.nextAngle = startGroup.cams.indexOf(currentCam) + 1;
+
+    for (let f = 0; f < totalFrames; f++) {
+      // Decrement FIRST so a switch at frame f blocks until f+cooldownFrames
+      // (the old post-loop decrement made the effective cooldown one frame short).
+      if (cooldownLeft > 0) cooldownLeft--;
+
+      // Who's talking? Loudest active SPEAKER (angle group) + count of
+      // simultaneously active speakers. Angles of one speaker share mics,
+      // so any group member's activity represents the speaker.
+      let bestGroup: AngleGroup | null = null;
+      let bestVal = 0;
+      let activeCount = 0;
+      for (const g of angleGroups) {
+        const rep = g.cams[0];
+        if (isOn[rep][f]) {
+          activeCount++;
+          if (activity[rep][f] > bestVal) { bestVal = activity[rep][f]; bestGroup = g; }
+        }
+      }
+
+      // Desired camera this frame:
+      //   3+ simultaneous speakers → trio shot (else duo, else loudest)
+      //   2 simultaneous          → duo shot (else trio, else loudest)
+      //   one speaker             → their group's CURRENT angle (angles only
+      //                             rotate on return or max-shot, never mid-shot)
+      //   silence                 → wide if present, else hold current
+      let desired: number;
+      if (activeCount >= 3 && trioIdx >= 0) desired = trioIdx;
+      else if (activeCount >= 2 && (duoIdx >= 0 || trioIdx >= 0)) desired = duoIdx >= 0 ? duoIdx : trioIdx;
+      else if (bestGroup) {
+        desired = groupOfCam.get(currentCam) === bestGroup
+          ? currentCam
+          : bestGroup.cams[bestGroup.nextAngle % bestGroup.cams.length];
+      } else desired = silenceCam >= 0 ? silenceCam : currentCam;
+
+      // Wide-ratio enforcement overrides conversation flow (immediate, no
+      // hysteresis) but respects cooldown and a warmup so the opening of
+      // the edit isn't dominated by catch-up cuts.
+      const actualRatio = f > 0 ? wideShotFrames / f : 0;
+      const curGroup = groupOfCam.get(currentCam);
+      if (wideIndices.size > 0 && !wideIndices.has(currentCam) && cooldownLeft === 0 &&
+          f >= wideWarmupFrames && (wideRatio - actualRatio) > WIDE_SLACK) {
+        switchTo([...wideIndices][0], f);
+        cooldownLeft = wideHoldFrames;
+      } else if (maxShotFrames > 0 && curGroup && desired === currentCam &&
+                 cooldownLeft === 0 && (f - runStart) >= maxShotFrames) {
+        // Max-shot: the same speaker has held one shot too long. Rotate to
+        // their next angle; with a single angle, take a wide cutaway (the
+        // speaker hysteresis brings us back naturally).
+        if (curGroup.cams.length > 1) {
+          const next = curGroup.cams[(curGroup.cams.indexOf(currentCam) + 1) % curGroup.cams.length];
+          switchTo(next, f);
+          curGroup.nextAngle = curGroup.cams.indexOf(next) + 1;
+        } else if (wideIndices.size > 0) {
+          switchTo([...wideIndices][0], f);
+        }
+      } else if (desired !== currentCam && cooldownLeft === 0) {
+        // Hysteresis: the desired camera must persist before we commit.
+        // Silence→wide uses the longer patience.
+        const needed = bestGroup === null ? silenceHoldFrames : minSpeechFrames;
+        if (desired === pendingTarget) {
+          pendingFrames++;
+          if (pendingFrames >= needed) {
+            switchTo(desired, f, pendingStart);
+            // Returning to this speaker later shows their NEXT angle.
+            const g = groupOfCam.get(desired);
+            if (g) g.nextAngle = g.cams.indexOf(desired) + 1;
+          }
+        } else {
+          pendingTarget = desired;
+          pendingFrames = 1;
+          pendingStart = f;
+        }
+      } else if (desired === currentCam) {
+        pendingTarget = -1;
+        pendingFrames = 0;
+      }
+
+      if (wideIndices.has(currentCam)) wideShotFrames++;
+    }
+    runs.push({ camIdx: currentCam, startFrame: runStart, endFrame: totalFrames });
+
+  return {
+    ok: true as const,
+    runs, totalFrames, vadMode, wideIndices, speakerIndices,
+    camAudioClips, camTrackClips, fileForSource, seqDur,
+  };
+}
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -1505,14 +2097,202 @@ async function main() {
         if (!out) {
           out = path.join(workspaceDir(ws), "renders", defaultName);
         }
+
+        // ── Conflict-safe write (Premiere round-trip) ─────────────────────────
+        // If the target exists and is NOT exactly what we last wrote there (the
+        // user saved Premiere work over it, or it's a file JCut didn't create),
+        // never overwrite — write " v2"/" v3"… beside it instead. The user then
+        // pulls the update into their OPEN project via File > Import (or the
+        // JCut companion panel does it automatically). --force overrides.
+        let versionedFrom: string | undefined;
+        if (!a.force) {
+          const existing = await fileFingerprint(out);
+          if (existing) {
+            const ledger = await readExportLedger(ws);
+            const entry = ledger.find((e) => e.path === out);
+            const untouched = entry != null && fingerprintMatches(entry, existing);
+            if (!untouched) {
+              versionedFrom = out;
+              for (let v = 2; ; v++) {
+                const cand = versionedPath(out, v);
+                if (!(await fileFingerprint(cand))) { out = cand; break; }
+              }
+            }
+          }
+        }
+
         const res = await exportPrproj(seq, out, workspaceDir(ws));
+
+        // Record the written file's fingerprint so the next export (and
+        // prproj-sync-status) can tell our bytes from the user's edits.
+        const fp = await fileFingerprint(out);
+        if (fp) {
+          const ledger = (await readExportLedger(ws)).filter((e) => e.path !== out);
+          ledger.push({
+            path: out, sequence_id: seq.id, size: fp.size, mtime_ms: fp.mtime_ms,
+            exported_at: new Date().toISOString(),
+          });
+          await writeExportLedger(ws, ledger.slice(-100));
+        }
+
         emit({
           ok: true,
           output: res.output,
           sequences: res.sequences,
           clips: res.clips,
           warnings: res.warnings,
-          note: "Exported. Open in Premiere with File > Open Project.",
+          ...(versionedFrom ? { versioned_from: versionedFrom } : {}),
+          note: versionedFrom
+            ? `The file at ${path.basename(versionedFrom)} was changed since JCut wrote it (likely your Premiere edits) — ` +
+              `saved this export as "${path.basename(out)}" instead so nothing is lost. ` +
+              `In Premiere, use File > Import on the new file to bring the updated sequence into your open project.`
+            : "Exported. Open in Premiere with File > Open Project — or, if a project is already open, File > Import brings the sequence in without closing it.",
+        });
+        break;
+      }
+
+      case "prproj-sync-status": {
+        // Report the state of the Premiere round-trip for this workspace:
+        //   --workspace W
+        //   exports: every .prproj JCut wrote, each untouched | modified_in_premiere | missing
+        //   premiere_inbox: project copies pushed into <ws>/sync/ by the Premiere
+        //     companion panel ("Send to JCut") or by the user copying a saved project there
+        // modified_in_premiere / inbox files carry the USER's latest edits — import
+        // them with sequence-import-prproj before continuing to edit that timeline.
+        const ws = a.workspace || fail("--workspace required");
+        const ledger = await readExportLedger(ws);
+        const exportsOut: any[] = [];
+        for (const e of ledger) {
+          const fp = await fileFingerprint(e.path);
+          const status = !fp ? "missing"
+            : fingerprintMatches(e, fp) ? "untouched"
+            : "modified_in_premiere";
+          exportsOut.push({
+            path: e.path,
+            sequence_id: e.sequence_id,
+            exported_at: e.exported_at,
+            status,
+            ...(status === "modified_in_premiere"
+              ? { action: `Run sequence-import-prproj --file "${e.path}" to pull the user's Premiere edits back into the workspace.` }
+              : {}),
+          });
+        }
+        const syncDir = path.join(workspaceDir(ws), "sync");
+        const inbox: { path: string; modified_at: string; mtime_ms: number }[] = [];
+        try {
+          for (const f of await fs.readdir(syncDir)) {
+            if (!f.toLowerCase().endsWith(".prproj")) continue;
+            const st = await fs.stat(path.join(syncDir, f));
+            inbox.push({ path: path.join(syncDir, f), modified_at: new Date(st.mtimeMs).toISOString(), mtime_ms: st.mtimeMs });
+          }
+          inbox.sort((x, y) => y.mtime_ms - x.mtime_ms);
+        } catch { /* no sync dir yet — nothing pushed */ }
+        const modified = exportsOut.filter((e) => e.status === "modified_in_premiere");
+        emit({
+          ok: true,
+          exports: exportsOut,
+          premiere_inbox: inbox.map(({ mtime_ms: _m, ...r }) => r),
+          note: inbox.length
+            ? `Premiere pushed ${inbox.length} project cop${inbox.length === 1 ? "y" : "ies"} to sync/ — import the newest with sequence-import-prproj to continue from the user's latest edit.`
+            : modified.length
+              ? `${modified.length} exported project(s) were modified in Premiere. Import them back before re-editing that timeline — and don't worry about overwrites: re-exports automatically write a new " v2" file.`
+              : "No changes detected — all exports are exactly as JCut wrote them.",
+        });
+        break;
+      }
+
+      case "premiere-panel-status": {
+        // Health of the Premiere companion panel install (read-only, no side
+        // effects). Drives the app's Settings/Onboarding UI and lets the agent
+        // guide the user. Reports:
+        //   premiere_installed  — an Adobe Premiere Pro app exists in /Applications
+        //   panel_installed / panel_version / panel_up_to_date
+        //   debug_mode         — CEP PlayerDebugMode per CSXS runtime (needed for
+        //                        unsigned dev panels; 11/12 cover current Premiere)
+        //   [--dest DIR]       — install-location override (testing)
+        const st = await premierePanelStatus(a.dest as string | undefined);
+        emit({ ok: true, ...st });
+        break;
+      }
+
+      case "premiere-panel-install": {
+        // One-click install (or update) of the Premiere companion panel.
+        //   [--dest DIR]   install location override (testing; also skips `defaults`)
+        // Copies premiere-extension/ into the user CEP extensions folder and
+        // enables PlayerDebugMode so the unsigned development panel loads.
+        const src = premierePanelSrc();
+        try {
+          await fs.access(path.join(src, "CSXS", "manifest.xml"));
+        } catch {
+          emit({ ok: false, error: `Panel source not found at ${src} — is the premiere-extension folder present?` });
+          break;
+        }
+        const dest = (a.dest as string) ||
+          path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions", "com.jcutai.panel");
+        try {
+          // Clean install: remove any prior copy first so a stale/older/partial
+          // install (a common cause of "the panel doesn't load right") can't
+          // leave orphaned files behind. Then copy fresh.
+          await fs.rm(dest, { recursive: true, force: true });
+          await fs.mkdir(dest, { recursive: true });
+          await fs.cp(src, dest, {
+            recursive: true,
+            force: true,
+            filter: (p) => !/install\.sh$/.test(p),
+          });
+        } catch (e) {
+          emit({ ok: false, error: `Could not copy the panel to ${dest}: ${(e as Error).message}` });
+          break;
+        }
+
+        // Verify the copy actually landed by reading back the installed manifest
+        // version — never report success on a copy that silently didn't happen.
+        let installedVersion: string | null = null;
+        try {
+          const xml = await fs.readFile(path.join(dest, "CSXS", "manifest.xml"), "utf8");
+          installedVersion = xml.match(/ExtensionBundleVersion="([^"]+)"/)?.[1] ?? null;
+        } catch { /* verified below */ }
+        if (!installedVersion) {
+          emit({ ok: false, error: `Copied to ${dest} but the manifest is missing — the install did not complete.` });
+          break;
+        }
+
+        // Enable unsigned-panel loading across CEP runtimes. CSXS 9–14 covers
+        // every Premiere from CC2019 through current + near-future builds. Use an
+        // absolute `defaults` path (the packaged app's subprocess PATH may not
+        // include /usr/bin), then flush cfprefsd so Premiere sees it without a
+        // logout. Best-effort — status reports whether it stuck.
+        const debugEnabled: string[] = [];
+        if (!a.dest && process.platform === "darwin") {
+          const defaultsBin = existsSync("/usr/bin/defaults") ? "/usr/bin/defaults" : "defaults";
+          for (const v of [9, 10, 11, 12, 13, 14]) {
+            try {
+              await _pexecFile(defaultsBin, ["write", `com.adobe.CSXS.${v}`, "PlayerDebugMode", "1"]);
+              debugEnabled.push(`CSXS.${v}`);
+            } catch { /* best-effort */ }
+          }
+          try { await _pexecFile(existsSync("/usr/bin/killall") ? "/usr/bin/killall" : "killall", ["cfprefsd"]); }
+          catch { /* prefs cache flush is best-effort */ }
+        }
+
+        const st = await premierePanelStatus(a.dest as string | undefined);
+        const apps = st.premiere_apps;
+        emit({
+          ok: true,
+          installed_to: dest,
+          installed_version: installedVersion,
+          debug_enabled: debugEnabled,
+          ...st,
+          next_steps: [
+            apps.length > 0
+              ? `Fully quit (Cmd+Q) and reopen Premiere. The panel installs to the shared Adobe folder, so it works in EVERY installed version — restart each one you want to use it in: ${apps.join(", ")}.`
+              : "Install Adobe Premiere Pro, then fully quit and reopen it.",
+            "In Premiere: Window > Extensions > JCut.AI.",
+            "In the panel: press Read sequence to start a CastCut edit, or pick a project under Advanced to sync.",
+          ],
+          note: apps.length > 1
+            ? `Panel v${installedVersion} installed to the shared CEP folder — it will appear in all ${apps.length} installed Premiere versions once each is restarted (${apps.join(", ")}).`
+            : `Panel v${installedVersion} installed. Fully quit and reopen Premiere, then Window > Extensions > JCut.AI.`,
         });
         break;
       }
@@ -1557,9 +2337,19 @@ async function main() {
                 const destDir = path.join(workspaceDir(ws), "source", sub);
                 await fs.mkdir(destDir, { recursive: true });
                 const dest = path.join(destDir, base);
-                try { await fs.unlink(dest); } catch { /* ok */ }
-                await fs.symlink(path.resolve(src), dest);
-                seen.set(src, path.join("source", sub, base));
+                // The source may ALREADY live in this workspace (round-tripping a
+                // project JCut itself exported). Unlinking it to plant a symlink
+                // would replace the real file with a self-referential link and
+                // destroy the media — keep the existing file untouched instead.
+                const resolvedSrc = await fs.realpath(path.resolve(src)).catch(() => path.resolve(src));
+                const resolvedDest = await fs.realpath(dest).catch(() => dest);
+                if (resolvedSrc === resolvedDest || resolvedSrc === dest) {
+                  seen.set(src, path.join("source", sub, base));
+                } else {
+                  try { await fs.unlink(dest); } catch { /* ok */ }
+                  await fs.symlink(resolvedSrc, dest);
+                  seen.set(src, path.join("source", sub, base));
+                }
               } catch {
                 unresolved.push(src);
                 seen.set(src, src); // keep absolute; agent can relink
@@ -1705,6 +2495,9 @@ async function main() {
         //   [--min-silence 0.3]       minimum silence to remove in seconds (default 0.3)
         //   [--pre-buffer 0.15]       seconds of speech to keep before each silence (default 0.15)
         //   [--post-buffer 0.1]       seconds to keep after each silence (default 0.1)
+        //   [--keep-gaps]             cut the silence out but leave a gap instead of
+        //                             rippling (AutoPod's "delete and leave gap" mode —
+        //                             lets the editor review cuts before closing them)
         //   [--dry-run]               report cuts without applying them
         //
         // How it works:
@@ -1722,6 +2515,7 @@ async function main() {
         const preBuf = a["pre-buffer"] != null ? Number(a["pre-buffer"]) : 0.15;
         const postBuf = a["post-buffer"] != null ? Number(a["post-buffer"]) : 0.1;
         const dryRun = !!a["dry-run"];
+        const keepGaps = !!a["keep-gaps"];
 
 
         // Get audio clips on the target track, sorted by timeline position.
@@ -1745,9 +2539,10 @@ async function main() {
         const plannedCuts: PlannedCut[] = [];
 
         for (const clip of audioClips) {
-          const absSource = clip.source_path.startsWith("/")
-            ? clip.source_path
-            : path.join(workspaceDir(ws), clip.source_path);
+          // Resolve like every other command (tries source/audio, source/video…)
+          // — a naive workspaceDir join misses workspace-relative paths and made
+          // the planner silently find zero silences.
+          const absSource = await resolveWorkspaceMediaPath(ws, clip.source_path);
           let silResult: any;
           try {
             const { stdout } = await _pexecFile(_venvPython, [
@@ -1759,8 +2554,15 @@ async function main() {
               "--post-buffer", String(postBuf),
             ], { maxBuffer: 10 * 1024 * 1024 });
             silResult = JSON.parse(stdout);
-          } catch (err) {
-            continue; // skip unreadable clips
+          } catch {
+            // No Python venv (or it failed) — fall back to the deterministic
+            // pure-TS detector so silence removal works with just ffmpeg.
+            try {
+              const regions = await tsDetectSilence(absSource, threshDb, minSil, preBuf, postBuf);
+              silResult = { ok: true, silent_regions: regions };
+            } catch {
+              continue; // truly unreadable clip
+            }
           }
           if (!silResult.ok || !silResult.silent_regions?.length) continue;
 
@@ -1808,94 +2610,29 @@ async function main() {
           break;
         }
 
-        // Apply cuts: for each clip with silences, split at boundaries and remove
-        // the silent sub-clips. Process clips in REVERSE sequence order so ripple
-        // shifts don't invalidate downstream clip positions.
-        // Strategy: update each clip's trim_end to the first silence start, create
-        // replacement clips for spans after each silence, then remove the silent gaps.
+        // Apply cuts as MULTI-TRACK ripple deletes. The old approach rebuilt
+        // only the analyzed track's clips, which desynced every other track:
+        // camera video spanning a removed region kept its full length while the
+        // mic track compressed (and removeClips even deleted linked video
+        // outright). rippleDeleteRange cuts the region out of EVERY track —
+        // exactly what AutoPod's Jump Cut Editor does — so multicam sources and
+        // finished multicam edits both stay frame-synced.
         //
-        // Simpler + more robust: for each original clip, rebuild it as a set of
-        // non-silent sub-clips with updated trim points, replacing the original.
-        const totalClipsBefore = seq.clips.length;
-        const cutsByClip = new Map<string, PlannedCut[]>();
-        for (const cut of plannedCuts) {
-          if (!cutsByClip.has(cut.clip_id)) cutsByClip.set(cut.clip_id, []);
-          cutsByClip.get(cut.clip_id)!.push(cut);
+        // Merge planned cuts into non-overlapping sequence-space regions, then
+        // apply in REVERSE order so earlier region coordinates stay valid.
+        const sortedRegions = plannedCuts
+          .map((c) => ({ s: c.seq_start, e: c.seq_end }))
+          .sort((x, y) => x.s - y.s);
+        const merged: { s: number; e: number }[] = [];
+        for (const r of sortedRegions) {
+          const last = merged[merged.length - 1];
+          if (last && r.s <= last.e + 0.001) last.e = Math.max(last.e, r.e);
+          else merged.push({ ...r });
         }
-
-        let totalCutsApplied = 0;
-        // Process in reverse timeline order to keep positions stable.
-        const clipsWithCuts = [...cutsByClip.keys()].map((id) => seq.clips.find((c) => c.id === id)!).filter(Boolean);
-        clipsWithCuts.sort((a2, b) => b.start_time_seconds - a2.start_time_seconds);
-
-        for (const origClip of clipsWithCuts) {
-          const cuts = cutsByClip.get(origClip.id)!.sort((a2, b) => a2.source_start - b.source_start);
-          const speed = origClip.speed || 1.0;
-
-          // Build the non-silent spans within this clip's source window.
-          interface Span { trimStart: number; trimEnd: number; }
-          const spans: Span[] = [];
-          let cursor = origClip.trim_start_seconds;
-          for (const cut of cuts) {
-            if (cut.source_start > cursor) {
-              spans.push({ trimStart: cursor, trimEnd: cut.source_start });
-            }
-            cursor = cut.source_end;
-          }
-          if (cursor < origClip.trim_end_seconds) {
-            spans.push({ trimStart: cursor, trimEnd: origClip.trim_end_seconds });
-          }
-
-          if (spans.length === 0) {
-            // Entire clip is silent — remove it completely.
-            removeClips(seq, [origClip.id], false);
-            // Also remove linked partner (auto-pulled by removeClips).
-            totalCutsApplied += cuts.length;
-            continue;
-          }
-
-          // Remove the original clip, then re-insert as non-silent sub-clips.
-          // The first span reuses the original's timeline position; subsequent
-          // spans are placed end-to-end with no gap (ripple compresses the edit).
-          const seqStart = origClip.start_time_seconds;
-          removeClips(seq, [origClip.id], true); // no-ripple: we place replacements immediately
-          let pos = seqStart;
-          for (const span of spans) {
-            const dur = (span.trimEnd - span.trimStart) / speed;
-            const op: any = {
-              track: origClip.track,
-              source: origClip.source_path,
-              position_seconds: pos,
-              trim_start_seconds: span.trimStart,
-              trim_end_seconds: span.trimEnd,
-              speed: speed,
-              volume_db: origClip.volume_db,
-              video_only: true, // single-track replacement — never auto-pair; the linked partner was removed with the original
-              ...(origClip.label_color ? { label_color: origClip.label_color } : {}),
-              ...(origClip.category ? { category: origClip.category } : {}),
-            };
-            try { await addClips(ws, seq, [op]); } catch { /* skip bad span */ }
-            pos += dur;
-          }
-
-          // Ripple: shift everything downstream of the original clip's end by
-          // the amount removed (original duration - sum of retained spans).
-          const origDur = (origClip.trim_end_seconds - origClip.trim_start_seconds) / speed;
-          const retainedDur = spans.reduce((s, sp) => s + (sp.trimEnd - sp.trimStart) / speed, 0);
-          const delta = retainedDur - origDur; // negative = we removed time
-          if (Math.abs(delta) > 0.001) {
-            // Shift downstream clips relative to where the original clip ENDED
-            // (seqStart + origDur), not the new end — this correctly pulls everything
-            // after the gap left by removal toward the beginning.
-            const origEnd = seqStart + origDur;
-            for (const other of seq.clips) {
-              if (other.start_time_seconds >= origEnd - 0.001) {
-                other.start_time_seconds = Math.max(0, other.start_time_seconds + delta);
-              }
-            }
-          }
-          totalCutsApplied += cuts.length;
+        for (let i = merged.length - 1; i >= 0; i--) {
+          rippleDeleteRange(seq, merged[i].s, merged[i].e, !keepGaps);
         }
+        const totalCutsApplied = merged.length;
 
         await saveSequence(ws, seq);
         const newDuration = sequenceDuration(seq);
@@ -1974,9 +2711,10 @@ async function main() {
 
       // ── AutoPod-parity: Multi-Camera Editor ─────────────────────────────────
       case "analyze-multi-audio": {
-        // Compute per-frame RMS energy envelopes for multiple audio tracks in
-        // parallel. Used by sequence-multi-camera-editor to identify the dominant
-        // speaker at each moment. Returns a frame-by-frame dB array per track.
+        // Compute per-frame speech-activity envelopes (0–1, Silero VAD with RMS
+        // fallback — see analyze_audio.py envelope contract) for multiple audio
+        // tracks. Used by sequence-multi-camera-editor to identify the dominant
+        // speaker at each moment. Each track reports its own fps and vad_mode.
         //
         //   --files '["a.mp4","b.mp4","c.mp4"]'   or  --files a.mp4 b.mp4
         //   [--workspace W]
@@ -1993,12 +2731,116 @@ async function main() {
           files.map((f: string) => resolveWorkspaceMediaPath(ws, f).catch(() => f))
         );
 
-        const { stdout: envOut } = await _pexecFile(_venvPython, [
-          _analyzeAudioPy, "--mode", "envelope",
-          "--file", resolvedFiles[0],
-          "--files", ...resolvedFiles,
-        ], { maxBuffer: 50 * 1024 * 1024 });
-        emit({ ok: true, ...JSON.parse(envOut) });
+        try {
+          const { stdout: envOut } = await _pexecFile(_venvPython, [
+            _analyzeAudioPy, "--mode", "envelope",
+            "--file", resolvedFiles[0],
+            "--files", ...resolvedFiles,
+          ], { maxBuffer: 256 * 1024 * 1024 });
+          emit({ ok: true, ...JSON.parse(envOut) });
+        } catch {
+          // Node Silero VAD, then pure-TS RMS (see sequence-multi-camera-editor).
+          const tracks = [];
+          for (const f of resolvedFiles) {
+            try {
+              const env = await analyzeVadEnvelopeNode(f);
+              tracks.push({ file: f, ok: true, fps: env.fps, envelope_db: env.values, vad_mode: "silero" });
+            } catch {
+              try {
+                const env = await tsActivityEnvelope(f);
+                tracks.push({ file: f, ok: true, fps: env.fps, envelope_db: env.values, vad_mode: "rms" });
+              } catch (e2) {
+                tracks.push({ file: f, ok: false, error: (e2 as Error).message });
+              }
+            }
+          }
+          emit({ ok: true, mode: "envelope", tracks });
+        }
+        break;
+      }
+
+      case "multicam-plan": {
+        // Headless multicam switching plan — the engine behind the Premiere
+        // panel's fully-in-Premiere CastCut. Takes a JSON spec describing the
+        // OPEN Premiere sequence (absolute media paths + timeline placement,
+        // read by the panel via ExtendScript) and returns the camera-switch
+        // runs. No workspace, no sequence files, no export — the panel applies
+        // the cuts directly in the open Premiere sequence.
+        //
+        //   --spec '<json>'  or  --spec-file /path/spec.json
+        //   spec = {
+        //     cameras: [{
+        //       name, type: "solo"|"wide"|"duo"|"trio",
+        //       clips:       [{ path, start_seconds, trim_start_seconds, trim_end_seconds, speed? }],  // video placement
+        //       audio_clips: [{ path, start_seconds, trim_start_seconds, trim_end_seconds, speed? }],  // this camera's mic(s)
+        //     }],
+        //     settings: { cooldown, min_speech, wide_shot_ratio, silence_threshold, max_shot }
+        //   }
+        const rawSpec = a["spec-file"]
+          ? await fs.readFile(a["spec-file"], "utf8")
+          : (a.spec || fail("--spec '<json>' or --spec-file <path> required"));
+        let spec: any;
+        try { spec = JSON.parse(rawSpec); } catch (e) { fail(`spec is not valid JSON: ${(e as Error).message}`); }
+        const camsIn: any[] = Array.isArray(spec.cameras) ? spec.cameras : [];
+        if (camsIn.length < 2) fail("spec.cameras needs at least 2 cameras");
+        if (camsIn.length > 10) fail("spec.cameras supports up to 10 cameras");
+        const st = spec.settings || {};
+
+        // Build a transient in-memory sequence in the engine's shape: camera i's
+        // mics on synthetic track A<i+1>, its video placement on V<i+1>.
+        const planSeq: Sequence = {
+          id: "plan", name: "plan",
+          settings: { width: 1920, height: 1080, framerate: 30, sample_rate: 48000, color_space: "bt709" },
+          clips: [],
+        };
+        let cid = 0;
+        const pushClip = (track: string, cl: any, type: "audio" | "video") => {
+          const trimStart = Number(cl.trim_start_seconds) || 0;
+          const trimEnd = Number(cl.trim_end_seconds) || 0;
+          if (trimEnd <= trimStart) return;
+          planSeq.clips.push({
+            id: `p${++cid}`, track, source_path: String(cl.path),
+            start_time_seconds: Number(cl.start_seconds) || 0,
+            trim_start_seconds: trimStart, trim_end_seconds: trimEnd,
+            speed: Number(cl.speed) || 1.0, volume_db: 0, clip_type: type,
+          });
+        };
+        const planCams: MulticamCameraSpec[] = camsIn.map((c, i) => {
+          for (const cl of (c.audio_clips || [])) pushClip(`A${i + 1}`, cl, "audio");
+          for (const cl of (c.clips || [])) pushClip(`V${i + 1}`, cl, "video");
+          return {
+            video_track: `V${i + 1}`,
+            audio_track: `A${i + 1}`,
+            name: c.name || `Camera ${i + 1}`,
+            type: (c.type as MulticamCameraSpec["type"]) || "solo",
+          };
+        });
+
+        const plan = await computeMulticamRuns(planSeq, planCams, {
+          wideRatio: st.wide_shot_ratio != null ? Number(st.wide_shot_ratio) : 0.15,
+          cooldownSec: st.cooldown != null ? Number(st.cooldown) : 1.5,
+          minSpeechSec: st.min_speech != null ? Number(st.min_speech) : 0.5,
+          silThresh: st.silence_threshold != null ? Number(st.silence_threshold) : -35.0,
+          maxShotSec: st.max_shot != null ? Number(st.max_shot) : 0,
+        }, async (p) => p); // paths from Premiere are already absolute
+        if (!plan.ok) { emit({ ok: false, error: plan.error }); break; }
+
+        const toSec = (fr: number) => Math.round((fr / MULTICAM_STATE_FPS) * 1000) / 1000;
+        const runsOut = plan.runs.map((r) => ({
+          camera_index: r.camIdx,
+          camera: planCams[r.camIdx]?.name,
+          start_seconds: toSec(r.startFrame),
+          end_seconds: toSec(r.endFrame),
+        }));
+        emit({
+          ok: true,
+          cameras: planCams.length,
+          cuts: Math.max(0, runsOut.length - 1),
+          duration_seconds: toSec(plan.totalFrames),
+          vad_mode: plan.vadMode,
+          runs: runsOut,
+          note: "Switch plan computed. Apply in Premiere by razoring every camera track at each run boundary and deleting the segments of the inactive cameras.",
+        });
         break;
       }
 
@@ -2009,34 +2851,75 @@ async function main() {
         // + wide-shot forcing). Outputs a new flat sequence with camera-switch cuts.
         //
         //   --workspace W --sequence-id ID
-        //   --cameras '[{"video_track":"V1","audio_track":"A1","name":"Speaker A","type":"solo"},
-        //               {"video_track":"V2","audio_track":"A2","name":"Speaker B","type":"solo"},
-        //               {"video_track":"V3","audio_track":"A3","name":"Wide","type":"wide"}]'
+        //   [--cameras '[{"video_track":"V1","audio_track":"A1","name":"Speaker A","type":"solo"},
+        //                {"video_track":"V2","audio_track":"A2","name":"Speaker B","type":"solo"},
+        //                {"video_track":"V3","audio_track":"A3","name":"Wide","type":"wide"}]']
+        //     cameras is OPTIONAL — omitted, V/A track pairs are auto-detected
+        //     (same heuristic as sequence-detect-cameras).
         //   [--wide-shot-ratio 0.15]     fraction of total time to spend on wide shots (default 0.15)
         //   [--cooldown 1.5]             min seconds before switching speakers again (default 1.5)
         //   [--min-speech 0.5]           ignore speech bursts shorter than this (default 0.5)
         //   [--silence-threshold -35]    dB below which a speaker is not considered active (default -35)
+        //   [--max-shot 0]               max seconds on one shot while the same speaker talks:
+        //                                rotate to their next angle / wide cutaway (0 = off)
         //   [--output-name "Multicam Edit"]
         //
+        // Camera config extras (AutoPod parity):
+        //   audio_tracks: ["A1","A5"]  — multiple mics per camera (max activity wins)
+        //   two solo cameras with the SAME mic(s) = two ANGLES of one speaker;
+        //   the shown angle rotates each time the edit returns to that speaker.
+        //
         // Algorithm (mirrors AutoPod's approach):
-        //   1. Decode each speaker's audio track to a per-frame RMS envelope.
-        //   2. State machine advances frame-by-frame:
-        //      - Active speaker = track with highest RMS above silence threshold
-        //      - Cooldown prevents switching too rapidly (avoid jarring back-and-forth)
-        //      - Wide shot forced after wideShotInterval seconds on a non-wide camera
-        //      - Silence / overlap → hold current camera or cut to wide
-        //   3. Contiguous runs of the same camera become clips in the output sequence.
-        //   4. Output: new sequence with video from each camera angle, single audio mix.
+        //   1. Analyze each DISTINCT audio source file once (Silero VAD, RMS
+        //      fallback), then sample every camera's speech activity on a uniform
+        //      SEQUENCE-TIME grid — honoring each audio clip's timeline position,
+        //      trim in-point, and speed, across ALL clips on the track.
+        //   2. State machine advances frame-by-frame in sequence time:
+        //      - Active speaker = solo camera with highest activity above threshold
+        //      - Two/three simultaneous speakers cut to a "duo"/"trio" camera if present
+        //      - Hysteresis confirms a switch, then BACKDATES the cut to speech onset
+        //      - Cooldown prevents rapid back-and-forth; sustained silence cuts to wide
+        //      - Wide shots forced when the wide ratio lags the target (constant slack)
+        //   3. Contiguous runs become V1 clips placed at their sequence-time
+        //      positions (never accumulated), so video and audio stay in sync by
+        //      construction even across gaps or clip boundaries.
+        //   4. Output: new sequence with video cuts on V1, primary audio on A1 at
+        //      its original timing, and a colored marker per camera run.
         const ws = a.workspace || fail("--workspace required");
         const srcSeq = await loadSequence(ws, a["sequence-id"] || fail("--sequence-id required"));
+        // --cameras is OPTIONAL: when omitted, auto-detect V/A track pairs with
+        // the same heuristic as sequence-detect-cameras (highest of 3+ video
+        // tracks = wide). This makes the command one-shot for agents — small
+        // local models in particular struggle to author the JSON config.
+        let camerasAutoDetected = false;
         const cameras: Array<{
           video_track: string;
           audio_track: string;
           name: string;
           type?: "solo" | "wide" | "duo" | "trio";
         }> = (() => {
-          try { return JSON.parse(a.cameras || fail("--cameras required")); }
-          catch (e) { fail(`--cameras must be valid JSON: ${(e as Error).message}`); }
+          if (a.cameras) {
+            try { return JSON.parse(a.cameras); }
+            catch (e) { fail(`--cameras must be valid JSON: ${(e as Error).message}`); }
+          }
+          camerasAutoDetected = true;
+          const videoTracksWithClips = [...new Set(
+            srcSeq.clips.filter((c) => isVideoTrack(c.track)).map((c) => c.track)
+          )].sort((t1, t2) => parseInt(t1.slice(1)) - parseInt(t2.slice(1)));
+          if (videoTracksWithClips.length < 2) {
+            fail(`--cameras omitted and only ${videoTracksWithClips.length} video track(s) have clips — ` +
+              `put each camera's footage on its own V track (V1, V2, V3…) with audio on the matching A track.`);
+          }
+          return videoTracksWithClips.map((vt, i) => {
+            const isLast = i === videoTracksWithClips.length - 1;
+            const type: "wide" | "solo" = isLast && videoTracksWithClips.length >= 3 ? "wide" : "solo";
+            return {
+              video_track: vt,
+              audio_track: `A${vt.slice(1)}`,
+              name: type === "wide" ? "Wide" : i === 0 ? "Host" : `Speaker ${i + 1}`,
+              type,
+            };
+          });
         })();
         if (cameras.length < 2) fail("--cameras must include at least 2 cameras");
         if (cameras.length > 10) fail("--cameras supports up to 10 cameras");
@@ -2045,200 +2928,27 @@ async function main() {
         const cooldownSec = a.cooldown != null ? Number(a.cooldown) : 1.5;
         const minSpeechSec = a["min-speech"] != null ? Number(a["min-speech"]) : 0.5;
         const silThresh = a["silence-threshold"] != null ? Number(a["silence-threshold"]) : -35.0;
+        // Max time on one shot while the SAME speaker keeps talking: rotate to
+        // their next angle (or a wide cutaway) — AutoPod's variety control.
+        // 0 disables (default).
+        const maxShotSec = a["max-shot"] != null ? Number(a["max-shot"]) : 0;
         const outputName = (a["output-name"] as string) || `${srcSeq.name} (Multicam)`;
 
-        // Step 1: extract audio envelopes for each camera's audio track.
-
-        // Find the audio source file for each camera track.
-        interface CameraTrackData {
-          camIdx: number;
-          name: string;
-          type: string;
-          videoTrack: string;
-          audioTrack: string;
-          sourceFile: string | null;
-          envelopeDb: number[];
-          fps: number;
-        }
-        const trackData: CameraTrackData[] = [];
-        for (let i = 0; i < cameras.length; i++) {
-          const cam = cameras[i];
-          // Find the first audio clip on this camera's audio track.
-          const audioClip = srcSeq.clips
-            .filter((c) => c.track === cam.audio_track)
-            .sort((a2, b) => a2.start_time_seconds - b.start_time_seconds)[0];
-          const srcFile = audioClip
-            ? (audioClip.source_path.startsWith("/")
-              ? audioClip.source_path
-              : path.join(workspaceDir(ws), audioClip.source_path))
-            : null;
-          trackData.push({
-            camIdx: i,
-            name: cam.name || `Camera ${i + 1}`,
-            type: cam.type || "solo",
-            videoTrack: cam.video_track,
-            audioTrack: cam.audio_track,
-            sourceFile: srcFile,
-            envelopeDb: [],
-            fps: 43.0,
-          });
-        }
-
-        // Decode envelopes for all tracks with source files.
-        const tracksWithSource = trackData.filter((t) => t.sourceFile !== null);
-        if (tracksWithSource.length < 2) {
-          emit({ ok: false, error: "Need at least 2 cameras with audio clips on their assigned tracks." });
-          break;
-        }
-        const allFiles = tracksWithSource.map((t) => t.sourceFile!);
-        let envResult: any;
-        try {
-          const { stdout } = await _pexecFile(_venvPython, [
-            _analyzeAudioPy, "--mode", "envelope",
-            "--file", allFiles[0],
-            "--files", ...allFiles,
-          ], { maxBuffer: 100 * 1024 * 1024 });
-          envResult = JSON.parse(stdout);
-        } catch (err) {
-          emit({ ok: false, error: `Audio analysis failed: ${(err as Error).message}` });
-          break;
-        }
-
-        // Map envelope results back to trackData.
-        // Silero VAD returns 0–1 speech probabilities; RMS fallback returns dB.
-        let vadMode: "silero" | "rms" = "rms";
-        for (let i = 0; i < tracksWithSource.length; i++) {
-          const t = tracksWithSource[i];
-          const envTrack = envResult.tracks?.[i];
-          if (envTrack?.ok && envTrack.envelope_db) {
-            t.envelopeDb = envTrack.envelope_db;
-            t.fps = envTrack.fps || 43.0;
-            if (envTrack.vad_mode === "silero") vadMode = "silero";
-          }
-        }
-
-        // Normalise the silence threshold for each VAD mode:
-        //   Silero: values are 0–1 speech probability → threshold 0.5 (50% speech confidence)
-        //   RMS:    values are dB → use the user-supplied dB threshold (default -35)
-        const effectiveSilThresh = vadMode === "silero" ? 0.5 : silThresh;
-
-        // Step 2: state machine — advance frame by frame, decide which camera to show.
-        const fps = tracksWithSource[0]?.fps || 43.0;
-
-        // Use the SHORTEST track length so every frame index is valid across all tracks.
-        // Using max caused the shorter track to clamp its last dB value for the tail
-        // frames, making that speaker appear louder than they were.
-        const totalFrames = Math.min(...tracksWithSource.map((t) => t.envelopeDb.length));
-        if (totalFrames === 0) {
-          emit({ ok: false, error: "Could not decode audio envelopes — check source files." });
-          break;
-        }
-
-        // Identify wide cameras (used to force variety).
-        const wideIndices = new Set(
-          trackData.map((t, i) => (t.type === "wide" ? i : -1)).filter((i) => i >= 0)
+        const plan = await computeMulticamRuns(
+          srcSeq,
+          cameras,
+          { wideRatio, cooldownSec, minSpeechSec, silThresh, maxShotSec },
+          (src) => resolveWorkspaceMediaPath(ws, src),
         );
-        const nonWideIndices = trackData.map((_, i) => i).filter((i) => !wideIndices.has(i));
-        // Pick the default "silence camera": first wide if available, else camera 0.
-        const silenceCam = wideIndices.size > 0 ? [...wideIndices][0] : (nonWideIndices[0] ?? 0);
+        if (!plan.ok) { emit({ ok: false, error: plan.error }); break; }
+        const { runs, totalFrames, vadMode, wideIndices, speakerIndices,
+          camAudioClips, camTrackClips, fileForSource, seqDur } = plan;
+        const STATE_FPS = MULTICAM_STATE_FPS;
 
-        const cooldownFrames = Math.round(cooldownSec * fps);
-        const minSpeechFrames = Math.round(minSpeechSec * fps);
-
-        // Wide-shot ratio enforcement: track how many frames have been wide so far
-        // and force a wide shot whenever the actual ratio falls too far below target.
-        // This replaces the old interval formula which was tied to cooldown duration
-        // rather than the actual ratio, causing the ratio to be ignored in practice.
-        let wideShotFrames = 0;
-
-        let currentCam = nonWideIndices[0] ?? 0;
-        let cooldownLeft = 0;
-        let pendingSpeaker = -1;
-        let pendingFrames = 0;
-
-        // Camera run: contiguous spans of the same camera index.
-        const runs: { camIdx: number; startFrame: number; endFrame: number }[] = [];
-        let runStart = 0;
-        let runCam = currentCam;
-
-        // Returns dB for a track at a given frame. Returns -96 (silence) if the
-        // frame is out of range — correct behaviour since we use Math.min for
-        // totalFrames but tracks may still have floating-point length differences.
-        const getDb = (camIdx: number, frame: number): number => {
-          const t = tracksWithSource[camIdx];
-          if (!t || frame >= t.envelopeDb.length) return -96;
-          return t.envelopeDb[frame] ?? -96;
-        };
-
-        for (let f = 0; f < totalFrames; f++) {
-          // Find the loudest non-silent, non-wide speaker at this frame.
-          let bestCam = -1;
-          let bestDb = effectiveSilThresh;
-          for (const idx of nonWideIndices) {
-            const db = getDb(idx, f);
-            if (db > bestDb) { bestDb = db; bestCam = idx; }
-          }
-
-          const allSilent = bestCam === -1;
-
-          // Wide-shot ratio enforcement: if actual wide ratio is lagging behind the
-          // target by more than a cooldown's worth of frames, force a wide shot.
-          const actualRatio = f > 0 ? wideShotFrames / f : 0;
-          const ratioDeficit = wideRatio - actualRatio;
-          const forceWide = wideIndices.size > 0 &&
-            !wideIndices.has(currentCam) &&
-            ratioDeficit > (cooldownFrames / Math.max(f, 1));
-
-          let nextCam = currentCam;
-
-          if (allSilent && wideIndices.size > 0 && !wideIndices.has(currentCam) && cooldownLeft === 0) {
-            // Dead air: cut to the silence camera (wide if available) rather than
-            // holding on whoever was last speaking. This matches AutoPod's behaviour.
-            nextCam = silenceCam;
-            cooldownLeft = cooldownFrames;
-            pendingSpeaker = -1;
-            pendingFrames = 0;
-          } else if (forceWide) {
-            // Ratio enforcement: we're falling behind the wide-shot target.
-            nextCam = [...wideIndices][0];
-            cooldownLeft = cooldownFrames;
-            pendingSpeaker = -1;
-            pendingFrames = 0;
-          } else if (!allSilent && cooldownLeft <= 0 && bestCam !== currentCam && !wideIndices.has(bestCam)) {
-            // Hysteresis: confirm speaker switch only after minSpeechFrames of
-            // consistent dominance — prevents cuts on brief crosstalk or coughs.
-            if (bestCam === pendingSpeaker) {
-              pendingFrames++;
-              if (pendingFrames >= minSpeechFrames) {
-                nextCam = bestCam;
-                cooldownLeft = cooldownFrames;
-                pendingSpeaker = -1;
-                pendingFrames = 0;
-              }
-            } else {
-              pendingSpeaker = bestCam;
-              pendingFrames = 1;
-            }
-          } else if (allSilent || bestCam === currentCam) {
-            // No switch needed — clear pending state.
-            pendingSpeaker = -1;
-            pendingFrames = 0;
-          }
-
-          if (cooldownLeft > 0) cooldownLeft--;
-          if (wideIndices.has(nextCam !== runCam ? nextCam : currentCam)) wideShotFrames++;
-
-          if (nextCam !== runCam) {
-            runs.push({ camIdx: runCam, startFrame: runStart, endFrame: f });
-            runStart = f;
-            runCam = nextCam;
-            currentCam = nextCam;
-          }
-        }
-        runs.push({ camIdx: runCam, startFrame: runStart, endFrame: totalFrames });
-
-        // Step 3: convert frame runs to timeline clips and build the output sequence.
-        const seqDur = sequenceDuration(srcSeq);
+        // Step 3: convert frame runs to timeline clips and build the output
+        // sequence. Every clip is placed at its SEQUENCE-TIME position — never
+        // an accumulated cursor — so coverage gaps stay gaps and the video can
+        // never drift against the audio bed.
         const outSeq: Sequence = {
           id: newSeqId(),
           name: outputName,
@@ -2247,7 +2957,7 @@ async function main() {
           clips: [],
         };
 
-        // Find source clips per camera video track (sorted by start time).
+        // Source clips per camera video track (sorted by start time).
         const clipsByTrack = new Map<string, typeof srcSeq.clips>();
         for (const cam of cameras) {
           clipsByTrack.set(
@@ -2256,34 +2966,9 @@ async function main() {
           );
         }
 
-        // Helper: find the source clip that covers seqStart and compute its trim
-        // points for the requested [seqStart, seqEnd] window. Trims to whatever is
-        // available in a single clip — if the run straddles a clip boundary we take
-        // what the first clip can supply rather than skipping the run entirely.
-        function findSourceForWindow(videoTrack: string, seqStart: number, seqEnd: number) {
-          const clips = clipsByTrack.get(videoTrack) || [];
-          for (const clip of clips) {
-            const clipEnd = clipTimelineEnd(clip);
-            // Find the clip whose timeline range CONTAINS seqStart (the cut point).
-            if (clip.start_time_seconds <= seqStart + 0.001 && clipEnd > seqStart) {
-              const offset = seqStart - clip.start_time_seconds;
-              const speed = clip.speed || 1.0;
-              const trimStart = clip.trim_start_seconds + offset * speed;
-              // Clamp trimEnd to whatever the clip actually has — handles the case
-              // where a camera run spans a clip boundary.
-              const trimEnd = Math.min(
-                trimStart + (seqEnd - seqStart) * speed,
-                clip.trim_end_seconds,
-              );
-              if (trimEnd <= trimStart + 0.01) return null; // degenerate
-              return { ...clip, trim_start_seconds: trimStart, trim_end_seconds: trimEnd };
-            }
-          }
-          return null;
-        }
-
-        let timePos = 0;
         const addedClipIds: string[] = [];
+        let segmentsSkipped = 0;
+        const skipReasons: string[] = [];
         // Markers to annotate which speaker/camera is on screen at each cut.
         const outputMarkers: SequenceMarker[] = [];
         const markerColors: MarkerColor[] = ["green", "blue", "cyan", "orange", "violet", "yellow", "red", "white"];
@@ -2291,64 +2976,133 @@ async function main() {
         for (const run of runs) {
           const cam = cameras[run.camIdx];
           if (!cam) continue;
-          const runDurSec = (run.endFrame - run.startFrame) / fps;
-          const seqStart = run.startFrame / fps;
-          const seqEnd = Math.min(seqStart + runDurSec, seqDur);
-          if (seqEnd <= seqStart) continue;
+          const seqStart = run.startFrame / STATE_FPS;
+          const seqEnd = Math.min(run.endFrame / STATE_FPS, seqDur);
+          if (seqEnd - seqStart < 0.02) continue;
 
-          const srcClip = findSourceForWindow(cam.video_track, seqStart, seqEnd);
-          if (!srcClip) continue;
+          // A run may span several source clips on the camera's track (or hit a
+          // gap). Emit one output clip per overlapping source segment, each at
+          // its own sequence position.
+          let covered = false;
+          for (const srcClip of clipsByTrack.get(cam.video_track) || []) {
+            const clipStart = srcClip.start_time_seconds;
+            const clipEnd = clipTimelineEnd(srcClip);
+            const segStart = Math.max(seqStart, clipStart);
+            const segEnd = Math.min(seqEnd, clipEnd);
+            if (segEnd - segStart < 0.02) continue;
+            const speed = srcClip.speed || 1.0;
+            const trimStart = srcClip.trim_start_seconds + (segStart - clipStart) * speed;
+            const trimEnd = Math.min(trimStart + (segEnd - segStart) * speed, srcClip.trim_end_seconds);
+            const op: any = {
+              track: "V1",
+              source: srcClip.source_path,
+              position_seconds: segStart,
+              trim_start_seconds: trimStart,
+              trim_end_seconds: trimEnd,
+              speed,
+              // video_only: the audio bed is laid down separately below. Without
+              // this, addClips auto-pairs each camera segment's own audio onto
+              // A1 — stacking a second, switching audio track on top of the mix.
+              video_only: true,
+              ...(srcClip.label_color ? { label_color: srcClip.label_color } : {}),
+            };
+            try {
+              const res = await addClips(ws, outSeq, [op]);
+              addedClipIds.push(...res.created.map((c) => c.id));
+              covered = true;
+            } catch (e) {
+              segmentsSkipped++;
+              if (skipReasons.length < 5) skipReasons.push((e as Error).message);
+            }
+          }
+          if (!covered) segmentsSkipped++;
 
-          const actualDur = (srcClip.trim_end_seconds - srcClip.trim_start_seconds) / (srcClip.speed || 1.0);
-          const op: any = {
-            track: "V1",
-            source: srcClip.source_path,
-            position_seconds: timePos,
-            trim_start_seconds: srcClip.trim_start_seconds,
-            trim_end_seconds: srcClip.trim_end_seconds,
-            speed: srcClip.speed || 1.0,
-            volume_db: srcClip.volume_db ?? 0,
-            ...(srcClip.label_color ? { label_color: srcClip.label_color } : {}),
-          };
-          try {
-            const res = await addClips(ws, outSeq, [op]);
-            addedClipIds.push(...res.created.map((c) => c.id));
-          } catch { /* skip unreadable source */ }
-
-          // Add a timeline marker for this speaker/camera so the editor can see
-          // the cut structure at a glance in Premiere — same as AutoPod's annotations.
           outputMarkers.push({
             id: `mc-${run.startFrame}-${run.camIdx}`,
-            time_seconds: Math.round(timePos * 100) / 100,
-            duration_seconds: Math.round(actualDur * 100) / 100,
+            time_seconds: Math.round(seqStart * 100) / 100,
+            duration_seconds: Math.round((seqEnd - seqStart) * 100) / 100,
             label: cam.name || `Camera ${run.camIdx + 1}`,
             color: markerColors[run.camIdx % markerColors.length],
           });
-
-          timePos += actualDur;
         }
         outSeq.markers = outputMarkers;
 
-        // Use the first camera's audio for the main audio mix.
-        const primaryAudio = cameras[nonWideIndices[0] ?? 0];
-        if (primaryAudio) {
-          const audioSrcClips = srcSeq.clips
-            .filter((c) => c.track === primaryAudio.audio_track)
-            .sort((a2, b) => a2.start_time_seconds - b.start_time_seconds);
-          let audioPos = 0;
-          for (const ac of audioSrcClips) {
+        // Audio bed. AutoPod parity requires EVERY mic in the result — using only
+        // camera 1's audio makes the other speakers inaudible unless a room mic
+        // caught them. So: render a deterministic ffmpeg amix of all solo-camera
+        // mics (time-aligned via each clip's position/trim) and lay THAT on A1.
+        // Falls back to copying the first solo camera's audio when mixing fails.
+        let audioMixFile: string | undefined;
+        try {
+          // One mix input per distinct mic recording across ALL solo cameras'
+          // audio tracks (multi-mic speakers contribute every mic; angle groups
+          // sharing a mic contribute it once).
+          const mixClips: Clip[] = [];
+          const seenMixSources = new Set<string>();
+          for (const i of speakerIndices) {
+            for (const list of camTrackClips[i]) {
+              const clip = list[0]; // standard podcast setup: one clip per mic
+              if (!clip || seenMixSources.has(clip.source_path)) continue;
+              seenMixSources.add(clip.source_path);
+              mixClips.push(clip);
+            }
+          }
+          if (mixClips.length >= 2) {
+            const inputs: string[] = [];
+            const filters: string[] = [];
+            mixClips.forEach((clip, k) => {
+              inputs.push("-i", fileForSource.get(clip.source_path)!);
+              const delayMs = Math.max(0, Math.round(clip.start_time_seconds * 1000));
+              filters.push(
+                `[${k}:a]atrim=${clip.trim_start_seconds}:${clip.trim_end_seconds},` +
+                `asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[m${k}]`,
+              );
+            });
+            const mixDir = path.join(workspaceDir(ws), "renders");
+            await fs.mkdir(mixDir, { recursive: true });
+            const mixOut = path.join(mixDir, `${outputName.replace(/[^\w.-]+/g, "_")}.mix.wav`);
+            const chain = `${filters.join(";")};${mixClips.map((_, k) => `[m${k}]`).join("")}` +
+              `amix=inputs=${mixClips.length}:normalize=0[out]`;
+            await _pexecFile(FFMPEG, [
+              "-y", "-v", "error", ...inputs,
+              "-filter_complex", chain, "-map", "[out]",
+              "-ar", "48000", "-ac", "2", mixOut,
+            ]);
+            audioMixFile = mixOut;
+          }
+        } catch { audioMixFile = undefined; }
+
+        let audioClipsAdded = 0;
+        if (audioMixFile) {
+          try {
+            await addClips(ws, outSeq, [{
+              track: "A1", source: audioMixFile, position_seconds: 0,
+              trim_start_seconds: 0, trim_end_seconds: seqDur, video_only: false,
+            }]);
+            audioClipsAdded++;
+          } catch { audioMixFile = undefined; /* fall through to single-mic bed */ }
+        }
+        if (!audioMixFile) {
+          // Fallback bed: first solo camera's audio at its ORIGINAL sequence
+          // positions (gaps preserved) so it lines up with the video cuts.
+          for (const ac of camAudioClips[speakerIndices[0]]) {
             const op: any = {
               track: "A1",
               source: ac.source_path,
-              position_seconds: audioPos,
+              position_seconds: ac.start_time_seconds,
               trim_start_seconds: ac.trim_start_seconds,
               trim_end_seconds: ac.trim_end_seconds,
               speed: ac.speed || 1.0,
               volume_db: ac.volume_db ?? 0,
               video_only: false,
             };
-            try { await addClips(ws, outSeq, [op]); } catch { /* skip */ }
-            audioPos += clipTimelineDuration(ac);
+            try {
+              await addClips(ws, outSeq, [op]);
+              audioClipsAdded++;
+            } catch (e) {
+              segmentsSkipped++;
+              if (skipReasons.length < 5) skipReasons.push((e as Error).message);
+            }
           }
         }
 
@@ -2363,16 +3117,31 @@ async function main() {
           sequence_id: outSeq.id,
           name: outSeq.name,
           cameras: cameras.length,
+          ...(camerasAutoDetected ? {
+            cameras_auto_detected: true,
+            camera_config: cameras,
+          } : {}),
           runs: runs.length,
           cuts: runs.length - 1,
           clips_added: addedClipIds.length,
+          audio_clips_added: audioClipsAdded,
+          ...(segmentsSkipped > 0 ? {
+            segments_skipped: segmentsSkipped,
+            skip_reasons: skipReasons,
+            warning: `${segmentsSkipped} segment(s) could not be placed — the timeline has gaps where a camera had no footage or a source was unreadable.`,
+          } : {}),
           duration_seconds: Math.round(sequenceDuration(outSeq) * 100) / 100,
           target_wide_ratio: wideRatio,
           actual_wide_ratio: actualWideRatio,
           cooldown_seconds: cooldownSec,
           vad_mode: vadMode,
+          ...(audioMixFile ? { audio_mix_file: audioMixFile } : {}),
           path: savedPath,
-          note: `Multi-camera edit created with ${runs.length - 1} camera cuts. Colored markers show each speaker. Export to Premiere to review.`,
+          note: `Multi-camera edit created with ${runs.length - 1} camera cuts. Colored markers show each speaker.` +
+            (audioMixFile
+              ? ` All mics were mixed into ${path.basename(audioMixFile)} and placed on A1 — in Premiere, drop that file onto A1 (the .prproj carries video only).`
+              : "") +
+            " Export to Premiere to review.",
         });
         break;
       }

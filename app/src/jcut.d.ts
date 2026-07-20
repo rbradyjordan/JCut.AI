@@ -54,7 +54,7 @@ declare global {
     pickSavePrproj(defaultName?: string): Promise<{ ok: boolean; path?: string }>;
     pickRelink(defaultDir?: string): Promise<{ ok: boolean; path?: string }>;
     readImage(filePath: string): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
-    listWorkspaces(): Promise<{ ok: boolean; workspaces: string[]; home?: string; error?: string }>;
+    listWorkspaces(): Promise<{ ok: boolean; workspaces: string[]; meta?: Record<string, number>; home?: string; error?: string }>;
     reveal(p: string): Promise<{ ok: boolean }>;
     chatsList(ws: string): Promise<{ ok: boolean; chats: { id: string; title: string; updated: number }[] }>;
     chatLoad(ws: string, id: string): Promise<{ ok: boolean; chat?: any; error?: string }>;

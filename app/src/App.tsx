@@ -15,6 +15,7 @@ import Sources from "./Sources";
 import ModePicker from "./ModePicker";
 import PodcastEditor from "./PodcastEditor";
 import CastCutHome from "./CastCutHome";
+import HomeDashboard from "./HomeDashboard";
 import WhatsNew, { CURRENT_VERSION } from "./WhatsNew";
 import type { CastCutProject } from "./CastCutHome";
 import ProjectGrid from "./ProjectGrid";
@@ -149,7 +150,7 @@ export default function App() {
   const [showAbout, setShowAbout] = useState(false);
   const [showWhatsNew, setShowWhatsNew] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; path: string; resolution?: string } | null>(null);
-  const [view, setView] = useState<"grid" | "editor" | "castcut-home" | "castcut-editor">("grid");
+  const [view, setView] = useState<"home" | "grid" | "editor" | "castcut-home" | "castcut-editor">("home");
   const [castcutProject, setCastcutProject] = useState<CastCutProject | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -262,7 +263,7 @@ export default function App() {
 
   const openProject = (ws: string) => { switchWorkspace(ws); setView("editor"); };
   const createProject = async (name: string) => { await createWorkspace(name); setView("editor"); };
-  const backToGrid = () => { refreshWorkspaces(); setView("grid"); };
+  const backToGrid = () => { refreshWorkspaces(); setView("home"); };
   const openCastCutHome = () => setView("castcut-home");
   const openCastCutProject = (proj: CastCutProject) => {
     setCastcutProject(proj);
@@ -532,17 +533,29 @@ export default function App() {
 
   const reduceMotion = !!settings.reduceMotion;
 
-  if (view === "grid" || view === "castcut-home") {
-    const launchTab = view === "castcut-home" ? "castcut" : "projects";
+  if (view === "home" || view === "grid" || view === "castcut-home") {
+    const nav: LauncherNav = view === "castcut-home" ? "castcut" : view === "grid" ? "projects" : "home";
     return (
       <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
         <LauncherShell
-          tab={launchTab}
-          onTabChange={(t) => setView(t === "castcut" ? "castcut-home" : "grid")}
+          nav={nav}
+          onNav={(n) => setView(n === "castcut" ? "castcut-home" : n === "projects" ? "grid" : "home")}
           onSettings={() => setShowSettings(true)}
         >
           <AnimatePresence mode="wait" initial={false}>
-            {launchTab === "projects" ? (
+            {nav === "home" ? (
+              <motion.div key="home" className="flex min-h-0 flex-1 overflow-hidden"
+                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
+                transition={spring.snappy}>
+                <HomeDashboard
+                  workspaces={workspaces}
+                  onOpenAI={openProject}
+                  onOpenCastCut={openCastCutProject}
+                  onGoAIEditor={() => setView("grid")}
+                  onGoCastCut={() => setView("castcut-home")}
+                />
+              </motion.div>
+            ) : nav === "projects" ? (
               <motion.div key="projects" className="flex min-h-0 flex-1 overflow-hidden"
                 initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -16 }}
                 transition={spring.snappy}>
@@ -1253,76 +1266,87 @@ function ChatInput({ value, onChange, onSend, onStop, busy, onAttachDoc }: {
   );
 }
 
-// ─── Launcher shell — shared frame for the Projects + CastCut tabs ────────────
+// ─── Launcher shell — persistent left-rail navigation for the launcher views ──
+
+type LauncherNav = "home" | "projects" | "castcut";
+
+function HomeGlyph({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5 9.5V20h14V9.5" />
+    </svg>
+  );
+}
 
 function LauncherShell({
-  tab, onTabChange, onSettings, children,
+  nav, onNav, onSettings, children,
 }: {
-  tab: "projects" | "castcut";
-  onTabChange: (t: "projects" | "castcut") => void;
+  nav: LauncherNav;
+  onNav: (n: LauncherNav) => void;
   onSettings?: () => void;
   children: React.ReactNode;
 }) {
+  const items: { id: LauncherNav; label: string; icon: React.ReactNode }[] = [
+    { id: "home", label: "Home", icon: <HomeGlyph size={17} /> },
+    { id: "projects", label: "AI Editor", icon: <Sparkle size={17} stroke={1.6} /> },
+    { id: "castcut", label: "CastCut", icon: <Columns size={17} stroke={1.8} /> },
+  ];
   return (
     <div className="grain relative flex h-full flex-col">
       <div className="backdrop" />
 
-      {/* Traffic-light strip */}
+      {/* Traffic-light strip (full width so drag region spans the top) */}
       <div className="drag relative z-30 h-9 shrink-0 border-b border-black/40 bg-black/20 backdrop-blur-xl" />
 
-      {/* Header with segmented tab */}
-      <div className="relative z-20 flex shrink-0 items-center gap-3 border-b border-white/[0.06] bg-black/10 px-6 py-3 backdrop-blur-xl">
-        <img src={iconUrl} alt="JCut.AI" className="h-6 w-6 opacity-90" />
+      <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
+        {/* Left navigation rail */}
+        <nav className="no-drag relative z-20 flex w-[168px] shrink-0 flex-col border-r border-white/[0.06] bg-black/15 px-3 py-4 backdrop-blur-xl">
+          <div className="mb-5 flex items-center gap-2 px-2">
+            <img src={iconUrl} alt="JCut.AI" className="h-6 w-6 opacity-90" />
+            <span className="text-[13px] font-semibold tracking-tight text-ink">JCut AI</span>
+          </div>
 
-        {/* Segmented control */}
-        <div className="relative flex items-center rounded-lg bg-black/25 p-0.5 ring-1 ring-white/[0.07]">
-          <motion.div
-            className="absolute inset-y-0.5 rounded-md"
-            style={{
-              background: tab === "castcut"
-                ? "linear-gradient(135deg,#23C6A2,#2E6BE6)"
-                : "rgba(255,255,255,0.09)",
-              left: tab === "castcut" ? "calc(50% + 1px)" : "2px",
-              right: tab === "castcut" ? "2px" : "calc(50% + 1px)",
-            }}
-            layout layoutId="launcher-tab-pill"
-            transition={spring.snappy}
-          />
-          {([
-            { id: "projects", label: "AI Editor" },
-            { id: "castcut",  label: "CastCut" },
-          ] as const).map((t) => (
-            <button
-              key={t.id}
-              onClick={() => onTabChange(t.id)}
-              className={`relative z-10 flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold transition-colors ${
-                tab === t.id ? "text-white" : "text-dim hover:text-ink"
-              }`}
-            >
-              {t.id === "castcut" && <Columns size={11} stroke={2} />}
-              {t.label}
-            </button>
-          ))}
-        </div>
+          <div className="flex flex-col gap-1">
+            {items.map((it) => {
+              const active = nav === it.id;
+              return (
+                <button
+                  key={it.id}
+                  onClick={() => onNav(it.id)}
+                  className={`relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors ${
+                    active ? "text-ink" : "text-dim hover:text-ink hover:bg-white/[0.04]"
+                  }`}
+                >
+                  {active && (
+                    <motion.div layoutId="launcher-nav-pill" transition={spring.snappy}
+                      className="absolute inset-0 rounded-lg bg-white/[0.08] ring-1 ring-white/[0.06]" />
+                  )}
+                  <span className="relative z-10 shrink-0">{it.icon}</span>
+                  <span className="relative z-10">{it.label}</span>
+                </button>
+              );
+            })}
+          </div>
 
-        <div className="ml-auto">
           {onSettings && (
-            <motion.button
-              whileHover={{ scale: 1.08, rotate: 35 }} whileTap={{ scale: 0.9 }}
+            <button
               onClick={onSettings}
-              className="grid h-7 w-7 place-items-center rounded-full text-dim hover:bg-surface2 hover:text-ink transition-colors"
-              title="Settings"
+              className="mt-auto flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium text-dim transition-colors hover:bg-white/[0.04] hover:text-ink"
             >
-              <SettingsIcon size={15} stroke={1.5} />
-            </motion.button>
+              <SettingsIcon size={16} stroke={1.6} className="shrink-0" />
+              Settings
+            </button>
           )}
-        </div>
-      </div>
+        </nav>
 
-      {/* Tab content */}
-      <div className="relative z-10 min-h-0 flex-1 overflow-hidden">
-        {children}
+        {/* Content */}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          {children}
+        </div>
       </div>
     </div>
   );
 }
+

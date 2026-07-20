@@ -36,6 +36,84 @@ export interface CastCutProject {
   last_output_seq_id: string | null;
 }
 
+// ─── Premiere extension prompt ─────────────────────────────────────────────────
+// Easy-to-find offer on the CastCut main page: if Premiere is installed but the
+// companion panel isn't (or is outdated), one click installs it. With the panel,
+// CastCut runs ENTIRELY inside Premiere — Window > Extensions > JCut.AI.
+
+function PremiereExtensionBanner() {
+  const [state, setState] = useState<"hidden" | "offer" | "update" | "busy" | "done">("hidden");
+
+  useEffect(() => {
+    (async () => {
+      if (window.localStorage.getItem("castcut.panelPromptDismissed") === "1") return;
+      const r = await window.jcut.jc("premiere-panel-status", []);
+      if (!r.ok) return;
+      try {
+        const s = JSON.parse(r.stdout);
+        if (!s.premiere_installed) return;      // no Premiere → no prompt
+        if (!s.panel_installed) setState("offer");
+        else if (!s.panel_up_to_date) setState("update");
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const install = async () => {
+    setState("busy");
+    const r = await window.jcut.jc("premiere-panel-install", []);
+    let ok = false;
+    try { ok = r.ok && JSON.parse(r.stdout).ok; } catch { /* */ }
+    setState(ok ? "done" : "offer");
+  };
+  const dismiss = () => {
+    window.localStorage.setItem("castcut.panelPromptDismissed", "1");
+    setState("hidden");
+  };
+
+  if (state === "hidden") return null;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }}
+      className="mx-6 mb-3 flex items-center gap-3 rounded-xl bg-surface/70 px-4 py-3 ring-1 ring-accent/25"
+    >
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-white"
+        style={{ background: TEAL_GRADIENT }}>
+        <Scissors size={15} stroke={1.5} />
+      </span>
+      <div className="min-w-0 flex-1">
+        {state === "done" ? (
+          <>
+            <div className="text-[13px] font-semibold text-ink">Extension installed</div>
+            <div className="text-[11px] text-dim">Restart Premiere, then open Window → Extensions → JCut.AI. CastCut runs entirely inside Premiere.</div>
+          </>
+        ) : (
+          <>
+            <div className="text-[13px] font-semibold text-ink">
+              {state === "update" ? "Update the Premiere extension?" : "Install Premiere extension?"}
+            </div>
+            <div className="text-[11px] text-dim">
+              Run CastCut entirely inside Premiere Pro — it reads your open sequence and cuts between cameras in place, no exporting.
+            </div>
+          </>
+        )}
+      </div>
+      {state !== "done" && (
+        <motion.button
+          whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}
+          onClick={install} disabled={state === "busy"}
+          className="shrink-0 rounded-lg px-3.5 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50"
+          style={{ background: TEAL_GRADIENT }}
+        >
+          {state === "busy" ? "Installing…" : state === "update" ? "Update" : "Install"}
+        </motion.button>
+      )}
+      <button onClick={dismiss} className="shrink-0 text-dim hover:text-ink" title="Don't show again">
+        <Close size={12} stroke={1.5} />
+      </button>
+    </motion.div>
+  );
+}
+
 // ─── Sidebar tips ───────────────────────────────────────────────────────────────
 
 const CASTCUT_TIPS = [
@@ -163,6 +241,9 @@ export default function CastCutHome({
             <Plus size={13} stroke={2} /> New project
           </motion.button>
         </div>
+
+        {/* Premiere extension prompt */}
+        <PremiereExtensionBanner />
 
         {/* Scrollable content */}
         <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">

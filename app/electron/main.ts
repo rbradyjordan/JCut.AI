@@ -553,10 +553,24 @@ ipcMain.handle("read-image", async (_e, filePath: string) => {
 ipcMain.handle("list-workspaces", async () => {
   try {
     const fs = await import("node:fs/promises");
+    const pathMod = await import("node:path");
     await fs.mkdir(JCUT_HOME, { recursive: true });
     const entries = await fs.readdir(JCUT_HOME, { withFileTypes: true });
-    const names = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-    return { ok: true, workspaces: names, home: JCUT_HOME };
+    const names = entries.filter((e) => e.isDirectory() && !e.name.startsWith("_")).map((e) => e.name);
+    // Recency map: newest mtime among the workspace's own dir + its sequences
+    // folder, so "Jump back in" on the Home dashboard can sort by last touched.
+    const meta: Record<string, number> = {};
+    await Promise.all(names.map(async (n) => {
+      let newest = 0;
+      for (const sub of ["", "sequences"]) {
+        try {
+          const st = await fs.stat(pathMod.join(JCUT_HOME, n, sub));
+          if (st.mtimeMs > newest) newest = st.mtimeMs;
+        } catch { /* missing sub */ }
+      }
+      meta[n] = newest;
+    }));
+    return { ok: true, workspaces: names, meta, home: JCUT_HOME };
   } catch (e: any) {
     return { ok: false, error: e.message, workspaces: [] };
   }

@@ -92,7 +92,9 @@ export function detectSequenceSettings(xml: string): { width: number; height: nu
   let fps = 30, fpsN = -1;
   for (const [r, n] of rateCounts) if (n > fpsN) { fps = r; fpsN = n; }
   // Snap near-standard rates (23.976, 29.97, 59.94 stay; 30.0000001 → 30).
-  const snapped = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60].find((s) => Math.abs(s - fps) < 0.05);
+  // Tolerance must be tighter than the smallest gap between standards (30−29.97
+  // = 0.03; 24−23.976 = 0.024) or exact 30fps snaps to 29.97.
+  const snapped = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60].find((s) => Math.abs(s - fps) < 0.01);
   return { width: w || 1920, height: h || 1080, framerate: snapped ?? Math.round(fps) };
 }
 

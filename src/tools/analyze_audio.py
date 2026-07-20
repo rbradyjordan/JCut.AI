@@ -413,6 +413,13 @@ def load_audio_16k(file_path, duration_limit=None):
         return None
 
 
+def db_to_activity(db):
+    """Map RMS dB to a 0–1 activity proxy comparable to a VAD probability.
+    -60dB → 0 (silence floor), 0dB → 1. Linear in dB, clamped."""
+    clamped = max(-60.0, min(0.0, db))
+    return round(float((clamped + 60.0) / 60.0), 3)
+
+
 def analyze_vad_envelope(file_path, duration_limit=None):
     """
     Run Silero VAD on an audio file and return per-frame speech probabilities
@@ -421,46 +428,46 @@ def analyze_vad_envelope(file_path, duration_limit=None):
     - RMS cannot: a loud but silent background music track defeats it entirely
     - 2MB model, CPU-only, ~5ms/s of audio on Apple Silicon
 
-    Returns (probs: list[float], fps: float) or falls back to RMS on failure.
+    Returns (values: list[float], fps: float, mode: str) where mode is
+    "silero" (true VAD probabilities) or "rms" (0–1 dB-proxy fallback used when
+    the model can't be loaded — e.g. offline torch.hub). Callers MUST label
+    output from `mode`, never from torch importability: importing torch can
+    succeed while the model download fails.
     """
     import torch
 
     model = _load_silero()
     if model is None:
-        # Graceful fallback to RMS
+        # Graceful fallback to a 0–1 RMS proxy at the RMS frame rate (~43 fps).
         samples_11k = load_audio(file_path, duration_limit=duration_limit or 3600)[0]
         if samples_11k is None:
-            return [], 43.0
+            return [], 43.0, "rms"
         rms_db, fps = analyze_rms_envelope(samples_11k, 11025)
-        # Convert dB to a 0–1 "speech probability" proxy: sigmoid-like mapping.
-        # -35dB → ~0 (silence floor), -10dB → ~1 (clear speech).
-        def db_to_prob(db):
-            clamped = max(-60.0, min(0.0, db))
-            return round(float((clamped + 60.0) / 60.0), 3)
-        return [db_to_prob(d) for d in rms_db], fps
+        return [db_to_activity(d) for d in rms_db], fps, "rms"
 
     true_dur = probe_duration(file_path)
     limit = duration_limit or (int(true_dur) + 5 if true_dur > 0 else 3600)
     samples = load_audio_16k(file_path, duration_limit=limit)
     if samples is None or len(samples) == 0:
-        return [], _SILERO_FPS
+        return [], _SILERO_FPS, "silero"
 
     wav = torch.from_numpy(samples)
     probs_out = []
 
     # Process in 512-sample windows. Silero resets per-call context with
-    # model.reset_states(); we call it once before the loop.
+    # model.reset_states(); we call it once before the loop. no_grad wraps the
+    # whole loop (one context, not one per frame).
     model.reset_states()
     num_frames = len(samples) // _SILERO_HOP
-    for i in range(num_frames):
-        chunk = wav[i * _SILERO_HOP: (i + 1) * _SILERO_HOP]
-        if len(chunk) < _SILERO_HOP:
-            chunk = torch.nn.functional.pad(chunk, (0, _SILERO_HOP - len(chunk)))
-        with torch.no_grad():
+    with torch.no_grad():
+        for i in range(num_frames):
+            chunk = wav[i * _SILERO_HOP: (i + 1) * _SILERO_HOP]
+            if len(chunk) < _SILERO_HOP:
+                chunk = torch.nn.functional.pad(chunk, (0, _SILERO_HOP - len(chunk)))
             speech_prob = model(chunk, _SILERO_SR).item()
-        probs_out.append(round(float(speech_prob), 4))
+            probs_out.append(round(float(speech_prob), 4))
 
-    return probs_out, round(_SILERO_FPS, 4)
+    return probs_out, round(_SILERO_FPS, 4), "silero"
 
 
 def main():
@@ -516,18 +523,25 @@ def main():
 
     if args.mode == "envelope":
         # Multi-track speaker detection — Silero VAD probabilities (0–1 per frame),
-        # with RMS dB fallback if Silero isn't available.
+        # with a 0–1 RMS-proxy fallback if Silero isn't available.
         # Silero advantages over RMS:
         #   - Distinguishes speech from music, noise, claps, room tone
         #   - Returns clean 0/1 probability — no dB threshold to tune
         #   - Same model weight (~2MB) works for all languages and mic types
+        #
+        # OUTPUT CONTRACT: `envelope_db` (legacy key name) is ALWAYS a 0–1
+        # activity value per frame, in BOTH modes. `vad_mode` reports what
+        # actually produced the values ("silero" or "rms") — consumers pick a
+        # threshold per mode (silero: ~0.5; rms: map their dB threshold via
+        # (dB+60)/60). `fps` is the true frame rate of the array (~31.25 for
+        # silero, ~43 for rms) and can differ per track.
         files = args.files or [args.file]
         tracks = []
         try:
             import torch  # noqa — only needed for Silero path
-            _silero_available = True
+            _torch_available = True
         except ImportError:
-            _silero_available = False
+            _torch_available = False
 
         for f in files:
             if not os.path.exists(f):
@@ -538,19 +552,21 @@ def main():
                 tracks.append({"file": f, "ok": False, "error": "Could not probe duration"})
                 continue
 
-            if _silero_available:
-                # Primary path: Silero VAD speech probabilities at ~31.25 fps
-                probs, fps = analyze_vad_envelope(f, duration_limit=int(true_dur) + 5)
+            if _torch_available:
+                # Primary path: Silero VAD. Mode comes from what the analyzer
+                # ACTUALLY used — model load can fail even when torch imports
+                # (e.g. offline torch.hub), in which case this is an RMS proxy.
+                values, fps, mode = analyze_vad_envelope(f, duration_limit=int(true_dur) + 5)
                 tracks.append({
                     "file": f,
                     "ok": True,
                     "duration_seconds": round(true_dur, 2),
                     "fps": fps,
-                    "envelope_db": probs,   # values are 0–1 speech prob, not dB
-                    "vad_mode": "silero",
+                    "envelope_db": values,   # 0–1 activity (see contract above)
+                    "vad_mode": mode,
                 })
             else:
-                # Fallback: RMS dB
+                # Fallback: RMS, converted to the same 0–1 activity scale.
                 samples, _ = load_audio(f, duration_limit=int(true_dur) + 5)
                 if samples is None or len(samples) == 0:
                     tracks.append({"file": f, "ok": False, "error": "Could not decode"})
@@ -561,10 +577,13 @@ def main():
                     "ok": True,
                     "duration_seconds": round(true_dur, 2),
                     "fps": fps,
-                    "envelope_db": envelope_db,
+                    "envelope_db": [db_to_activity(d) for d in envelope_db],
                     "vad_mode": "rms",
                 })
-        print(json.dumps({"ok": True, "mode": "envelope", "tracks": tracks}, indent=2))
+        # Compact JSON: per-frame arrays for hours of multi-track audio are large;
+        # indent=2 roughly doubles the payload and risks the caller's maxBuffer.
+        print(json.dumps({"ok": True, "mode": "envelope", "tracks": tracks},
+                         separators=(",", ":")))
         return
 
     # Default: beats mode

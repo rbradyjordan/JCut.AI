@@ -151,31 +151,13 @@ export default function PodcastEditor({
         return;
       }
 
-      // Jump cut pass first if enabled
-      if (settings.jump_cut_enabled) {
-        log("Removing silences…");
-        const primaryAudio = cameras.find((c) => c.type !== "wide")?.audio_tracks[0] || "A1";
-        const jcRes = await window.jcut.jc("sequence-jump-cut-editor", [
-          "--workspace", project.workspace,
-          "--sequence-id", sequence_id,
-          "--audio-track", primaryAudio,
-          "--threshold-db", String(settings.jump_cut_threshold),
-          "--min-silence", String(settings.jump_cut_min_silence),
-        ]);
-        if (jcRes.ok) {
-          const jcData = JSON.parse(jcRes.stdout);
-          if (jcData.silences_removed > 0)
-            log(`✓ Removed ${jcData.silences_removed} silence(s), saved ${jcData.time_saved_seconds}s`);
-          else log("No silences found to remove");
-        }
-      }
-
-      // Build --cameras JSON: each camera gets video_track + first audio_track
-      // (multi-mic: use the assigned audio_track for speaker detection)
+      // Build --cameras JSON: every assigned mic goes to the engine (it takes
+      // the max activity across a camera's mics — AutoPod's multi-mic behavior).
       log("Analyzing speaker audio…");
       const camJson = JSON.stringify(cameras.map((cam) => ({
         video_track: cam.video_track,
         audio_track: cam.audio_tracks[0] || "A1",
+        audio_tracks: cam.audio_tracks.length ? cam.audio_tracks : ["A1"],
         name: cam.name,
         type: cam.type,
       })));
@@ -197,6 +179,29 @@ export default function PodcastEditor({
 
       log(`✓ ${mcData.cuts} camera cuts`);
       log(`✓ ${Math.round((mcData.actual_wide_ratio ?? 0) * 100)}% wide shots`);
+
+      // Silence removal runs on the OUTPUT edit, never the source sequence:
+      // the source stays pristine (re-running the wizard is repeatable), and
+      // the jump cut ripples the flat V1/A1 edit — all tracks stay in sync.
+      if (settings.jump_cut_enabled) {
+        log("Removing silences…");
+        const jcRes = await window.jcut.jc("sequence-jump-cut-editor", [
+          "--workspace", project.workspace,
+          "--sequence-id", mcData.sequence_id,
+          "--audio-track", "A1",
+          "--threshold-db", String(settings.jump_cut_threshold),
+          "--min-silence", String(settings.jump_cut_min_silence),
+        ]);
+        if (jcRes.ok) {
+          try {
+            const jcData = JSON.parse(jcRes.stdout);
+            if (jcData.ok && jcData.silences_removed > 0)
+              log(`✓ Removed ${jcData.silences_removed} silence(s), saved ${jcData.time_saved_seconds}s`);
+            else log("No silences found to remove");
+          } catch { log("Silence pass skipped (could not read result)"); }
+        }
+      }
+
       log(`✓ Duration: ${mcData.duration_seconds}s`);
       log("Done — export sequence to Premiere to finish");
 

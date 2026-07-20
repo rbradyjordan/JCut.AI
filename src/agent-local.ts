@@ -214,7 +214,13 @@ const ALL_COMMANDS = new Set([
   "criteria-get","criteria-set","memory-read","memory-append",
   "analyze-music","analyze-video","modes-list","mode-get","kb-list","kb-read",
   "transcript-import","transcript-list","transcript-get","transcript-search",
-  "prproj-analyze", "content-analyze"
+  "prproj-analyze", "content-analyze",
+  "sequence-kenburns-add","source-clear","preset-save","preset-delete",
+  "analyze-faces","sequence-auto-reframe-faces",
+  "analyze-silence","sequence-jump-cut-editor",
+  "sequence-detect-cameras","analyze-multi-audio","sequence-multi-camera-editor",
+  "sequence-social-clips","prproj-sync-status",
+  "premiere-panel-status","premiere-panel-install",
 ]);
 
 // Commands that need --workspace. The model is no longer asked to supply it;
@@ -231,7 +237,12 @@ const NEEDS_WORKSPACE = new Set([
   "sources-list","source-add","source-localize","source-remove","source-relink",
   "criteria-get","criteria-set","memory-read","memory-append",
   "analyze-music","analyze-video","transcript-import","transcript-list","transcript-get","transcript-search",
-  "prproj-analyze", "content-analyze"
+  "prproj-analyze", "content-analyze",
+  "sequence-kenburns-add","source-clear","preset-save","preset-delete",
+  "analyze-faces","sequence-auto-reframe-faces",
+  "analyze-silence","sequence-jump-cut-editor",
+  "sequence-detect-cameras","analyze-multi-audio","sequence-multi-camera-editor",
+  "sequence-social-clips","prproj-sync-status",
 ]);
 
 function normalizeArgs(command: string, rawArgs: string[]): { command: string; args: string[] } {
@@ -712,6 +723,22 @@ async function main() {
     `     Do NOT pass --output — the app pops a Save dialog so the USER picks where to save,\n` +
     `     every export (including "export it again"). Only pass --output if the user gave a path.\n` +
     `     If the result has cancelled:true, the user closed the dialog — just acknowledge it.\n` +
+    `     Re-exports are SAFE while the user edits in Premiere: if they saved over a previous\n` +
+    `     export, a new " v2" file is written automatically (never overwritten) — tell them to\n` +
+    `     File > Import it into their open project. Before re-editing a previously exported\n` +
+    `     timeline, run prproj-sync-status: if it says modified_in_premiere (or lists a sync/\n` +
+    `     inbox file), FIRST pull the user's edits in with sequence-import-prproj --file <path>.\n` +
+    `\n` +
+    `PODCAST / MULTI-CAMERA (2+ cameras filming the SAME conversation — "podcast",\n` +
+    `"multicam", "interview with two cameras", "cut between cameras"):\n` +
+    `  1. Put each camera's file on its OWN track pair, all at position 0, in ONE\n` +
+    `     sequence-clips-add call: camera 1 → V1, camera 2 → V2, wide/room camera → V3.\n` +
+    `     Audio pairs onto A1/A2/A3 automatically.\n` +
+    `  2. sequence-multi-camera-editor --sequence-id ID  → done. It detects the cameras\n` +
+    `     automatically, analyzes who is speaking, and returns a NEW sequence_id with all\n` +
+    `     the camera cuts made. Do NOT pass --cameras unless the auto-detect got a role wrong.\n` +
+    `  3. Use the RETURNED sequence_id for everything after (jump cuts, export).\n` +
+    `  Optional cleanup: sequence-jump-cut-editor --sequence-id ID removes silent pauses.\n` +
     `\n` +
     `SCALE TO FIT THE CANVAS (critical — wrong scale = tiny/cropped footage):\n` +
     `  Compute scale so the source FILLS the sequence frame. FILL = max(canvas_w/src_w, canvas_h/src_h).\n` +
